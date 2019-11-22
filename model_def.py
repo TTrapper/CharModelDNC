@@ -3,12 +3,12 @@ import tensorflow as tf
 
 import data_pipe
 
-def make_model(seqlen):
+def make_model():
     numclasses = 256 # assume utf-8 bytes
     layersize = 1024
     numlayers = 4
     memsize = 8
-    inputs = tf.keras.Input((seqlen))
+    inputs = tf.keras.Input((None,))
     # Embed Characters
     char_embeds_3 = tf.keras.layers.Embedding(numclasses, layersize)(inputs)
     # Sequence layers
@@ -73,24 +73,32 @@ class DNCCell(tf.keras.layers.Layer):
         memory_2 = tf.reshape(memory_3, [-1, self.memsize * self.units])
         return transformed_2, [memory_2]
 
-def run_inference(model, context_string, seqlen):
+@tf.function
+def sample_logits(logits, temperature):
+    prediction = tf.random.categorical(logits/temperature, num_samples=1)
+    return prediction
+
+def run_inference(model, context_string, numpredict, temperature=1e-16):
     context_string = bytes(context_string, 'utf-8')
     contextlen = len(context_string)
-    assert contextlen < seqlen
-    while contextlen  < seqlen:
-        context_padded = context_string.ljust(seqlen)
-        input_ids = data_pipe.string_to_ids(tf.constant(context_padded))
-        input_ids = tf.expand_dims(input_ids, axis=0)
+    temperature = tf.constant(temperature)
+    input_ids = data_pipe.string_to_ids(tf.constant(context_string))
+    input_ids = tf.expand_dims(input_ids, axis=0)
+    for _ in range(numpredict):
         outputs = model.predict(input_ids, steps=1)
-        logits = outputs[0, contextlen - 1, :]
-        prediction = bytes(chr(np.argmax(logits)), 'utf-8')
-        context_string += prediction
-        contextlen = len(context_string)
-    print(context_string)
+        latest_logits = outputs[:, -1, :]
+        prediction = sample_logits(latest_logits, temperature)
+        prediction = tf.cast(prediction, input_ids.dtype)
+        input_ids = tf.concat([input_ids, prediction], axis=1)
+    outstring = data_pipe.ids_to_string(input_ids)
+    print(outstring[0])
 
 if __name__ == '__main__':
-    seqlen = 63
 #    model = make_model(seqlen)
     model = tf.keras.models.load_model('./model.hd5', custom_objects={'DNCCell':DNCCell},
         compile=True)
-    run_inference(model, 'she', 63)
+    run_inference(model, 'she', 63, 1e-16)
+    run_inference(model, 'she', 63, 0.5)
+    run_inference(model, 'she', 63, 0.775)
+
+

@@ -8,8 +8,7 @@ def setup():
     learn_rate = 1e-4
     dataset = data_pipe.file_to_dataset()
     # Get the batch size and sequence length by peeking at the first Dataset element
-    batchsize, seqlen = next(iter(dataset))[0].shape
-    model = model_def.make_model(seqlen)
+    model = model_def.make_model()
     optimizer = tf.keras.optimizers.Adam(learn_rate)
     model.compile(optimizer=optimizer,
                   loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True))
