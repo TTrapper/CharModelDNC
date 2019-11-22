@@ -9,7 +9,7 @@ def setup():
     dataset = data_pipe.file_to_dataset()
     # Get the batch size and sequence length by peeking at the first Dataset element
     batchsize, seqlen = next(iter(dataset))[0].shape
-    model = model_def.make_model(batchsize, seqlen)
+    model = model_def.make_model(seqlen)
     optimizer = tf.keras.optimizers.Adam(learn_rate)
     model.compile(optimizer=optimizer,
                   loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True))
@@ -18,10 +18,12 @@ def setup():
 
 def train(model, dataset):
     batchsize, seqlen = next(iter(dataset))[0].shape
-    inference_callback = tf.keras.callbacks.LambdaCallback(
-        on_epoch_end=lambda epoch, logs: model_def.run_inference(model, 'she', seqlen))
-    checkpoint = tf.keras.callbacks.ModelCheckpoint('./saved', save_freq=int(1e5))
-    callbacks = [inference_callback, checkpoint]
+    def inference_fn(batch, logs):
+        if batch % 2000 == 1999:
+            model_def.run_inference(model, 'she', seqlen)
+            model.save('./saved', overwrite=True, include_optimizer=True)
+    inference_callback = tf.keras.callbacks.LambdaCallback(on_batch_end=inference_fn)
+    callbacks = [inference_callback]
     model.fit(dataset, epochs=200, verbose=1, steps_per_epoch=None, use_multiprocessing=True,
         callbacks=callbacks)
 

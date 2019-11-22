@@ -3,7 +3,7 @@ import tensorflow as tf
 
 import data_pipe
 
-def make_model(batchsize, seqlen):
+def make_model(seqlen):
     numclasses = 256 # assume utf-8 bytes
     layersize = 512
     numlayers = 4
@@ -47,7 +47,7 @@ class DNCCell(tf.keras.layers.Layer):
         self.transformlayer = tf.keras.layers.Dense(self.units, tf.nn.relu)
         self.built = True
 
-    def call(self, inputs, states):
+    def call(self, inputs, states, training=False):
         # Take the memory state from the previous step concat the current input to it
         memory_3 = tf.reshape(states[0], [-1, self.memsize, self.units])
         value_3 = tf.expand_dims(inputs, axis=1)
@@ -79,3 +79,8 @@ def run_inference(model, context_string, seqlen):
         context_string += prediction
         contextlen = len(context_string)
     print(context_string)
+
+if __name__ == '__main__':
+    seqlen = 63
+    model = model_def.make_model(seqlen)
+    run_inference(model, 'she', 63)
