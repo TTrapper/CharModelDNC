@@ -5,7 +5,7 @@ import data_pipe
 
 def make_model(seqlen):
     numclasses = 256 # assume utf-8 bytes
-    layersize = 512
+    layersize = 1024
     numlayers = 4
     memsize = 8
     inputs = tf.keras.Input((seqlen))
@@ -37,6 +37,14 @@ class DNCCell(tf.keras.layers.Layer):
         self.output_size = units
         self.memsize = memsize
         super(DNCCell, self).__init__(**kwargs)
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            'units': self.units,
+            'memsize': self.memsize,
+        })
+        return config
 
     def build(self, input_shape):
         if input_shape[-1] != self.units:
@@ -82,5 +90,7 @@ def run_inference(model, context_string, seqlen):
 
 if __name__ == '__main__':
     seqlen = 63
-    model = model_def.make_model(seqlen)
+#    model = make_model(seqlen)
+    model = tf.keras.models.load_model('./model.hd5', custom_objects={'DNCCell':DNCCell},
+        compile=True)
     run_inference(model, 'she', 63)

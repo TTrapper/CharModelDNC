@@ -21,7 +21,8 @@ def train(model, dataset):
     def inference_fn(batch, logs):
         if batch % 2000 == 1999:
             model_def.run_inference(model, 'she', seqlen)
-            model.save('./saved', overwrite=True, include_optimizer=True)
+#            model.save('./saved', overwrite=True, include_optimizer=True)
+            model.save('./model.hd5', save_format='h5', overwrite=True, include_optimizer=True)
     inference_callback = tf.keras.callbacks.LambdaCallback(on_batch_end=inference_fn)
     callbacks = [inference_callback]
     model.fit(dataset, epochs=200, verbose=1, steps_per_epoch=None, use_multiprocessing=True,
