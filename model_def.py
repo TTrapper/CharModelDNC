@@ -26,12 +26,16 @@ def make_model(batchsize, seqlen):
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     return model
 
-def gatedrnn_block(char_embeds_3, layersize):
+def rnn_block(char_embeds_3, layersize, gated):
     """
     Scans the the sequence of char_embeds_3 and applies a simplified gated rnn
+    char_embeds_3: the inputs sequence with shape [batchsize, seqlen, layersize]
+    layersize: int that matches the input depth
+    gated: whether or not the RNN applies gated updates
     """
     char_embeds_3 = tf.transpose(char_embeds_3, [1, 0, 2])
-    char_embeds_3 = tf.scan(make_gatedrnn_fn(layersize), char_embeds_3, parallel_iterations=1)
+    rnn_step_fn = make_rnn_fn(layersize, gated)
+    char_embeds_3 = tf.scan(rnn_step_fn, char_embeds_3, parallel_iterations=1)
     char_embeds_3 = tf.transpose(char_embeds_3, [1, 0, 2])
     char_embeds_3 = tf.keras.layers.LayerNormalization(axis=-1)(char_embeds_3)
     return char_embeds_3
@@ -64,32 +68,24 @@ def make_cumsum_decay_fn(decay):
         return decay*accumulated + current
     return cumsum_decay_fn
 
-def make_rnn_fn(layersize):
+def make_rnn_fn(layersize, gated):
     """
-    Returns a function that computes a simplified RNN: dense(last_out + current_in). Note that there
-    are not any actual recurrent weights and instead simply sums the context with the current input.
+    Returns a function that computes one step of a simplified RNN. Note there are not any actual
+    recurrent weights and instead simply sums the context with the current input.
     layersize: int that matches the input size and is the size of the generated layer.
+    gated: boolean determines whether or not to apply gated memory. Similar to a simlified GRU.
     """
     layer = tf.keras.layers.Dense(layersize, tf.nn.relu)
-    def rnn_fn(accumulated, current):
-        return layer(accumulated + current)
-    return rnn_fn
-
-def make_gatedrnn_fn(layersize):
-    """
-    Returns a function that computes a gated combination of the last output with the current input.
-    This is similar to a GRU but greatly simplified.
-    layersize: int that matches the input size and is the size of the generated layer.
-    """
-    layer = tf.keras.layers.Dense(layersize, tf.nn.relu)
-    gate_layer = tf.keras.layers.Dense(layersize, tf.nn.sigmoid)
-    normlayer = tf.keras.layers.LayerNormalization(axis=-1)
-    def gatedrnn_fn(accumulated, current):
-        candidate = layer(normlayer(accumulated + current))
-        gates = gate_layer(candidate)
-        out = (gates * candidate) + ((1 - gates) * accumulated)
-        return out
-    return gatedrnn_fn
+    if gated:
+        gate_layer = tf.keras.layers.Dense(layersize, tf.nn.sigmoid)
+    def rnn_step_fn(accumulated, current):
+        candidate = layer(accumulated + current)
+        if not gated:
+            return candidate
+        else:
+            gates = gate_layer(candidate)
+            return (gates * candidate) + ((1 - gates) * accumulated)
+    return rnn_step_fn
 
 def make_dnc_fn(memsize, layersize):
     """
@@ -107,7 +103,7 @@ def make_dnc_fn(memsize, layersize):
         value_3 = tf.expand_dims(value_2, axis=1)
         attended_mem_3 = tf.concat([memory_3, value_3], axis=1)
         # Compute attention over memory
-        read_weights_2 = readlayer(tf.reduce_sum(attended_mem_3, axis=1))
+        read_weights_2 = readlayer(tf.reduce_mean(attended_mem_3, axis=1))
         read_weights_3 = tf.expand_dims(read_weights_2, axis=2)
         attended_mem_2 = tf.reduce_sum(read_weights_3 * attended_mem_3, axis=1)
         # Compute a new value from the attended memory
