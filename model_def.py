@@ -59,15 +59,6 @@ def dnc_block(char_embeds_3, layersize, memsize):
     char_embeds_3 = tf.keras.layers.LayerNormalization(axis=-1)(char_embeds_3)
     return char_embeds_3
 
-def make_cumsum_decay_fn(decay):
-    """
-    Returns a function for computing cumulative sum with decay for use with tf.scan
-    decay: the decay rate
-    """
-    def cumsum_decay_fn(accumulated, current):
-        return decay*accumulated + current
-    return cumsum_decay_fn
-
 def make_rnn_fn(layersize, gated):
     """
     Returns a function that computes one step of a simplified RNN. Note there are not any actual
@@ -114,34 +105,6 @@ def make_dnc_fn(memsize, layersize):
         memory_3 = ((1 - write_weights_3) * memory_3) + (write_weights_3 * transformed_3)
         return (memory_3, transformed_2)
     return dnc_fn
-
-def add_relative_position(embeds_3, layer):
-    """
-    Takes a sequence of embeds and computes new embeds that contain relative positional information
-    embeds_3: tensor with shape [batchsize, seqlen, embedsize]
-    layer: a keras layer with a nonlinearity that combines the embedding with it's position signal
-    """
-    batchsize = tf.shape(embeds_3)[0]
-    seqlen = embeds_3.shape[1]
-    position_ids_1 = (1 + tf.range(seqlen, dtype=embeds_3.dtype))/tf.cast(seqlen, embeds_3.dtype)
-    position_ids_3 = tf.expand_dims(tf.expand_dims(position_ids_1, axis=0), axis=-1)
-    position_ids_3 = tf.tile(position_ids_3, [batchsize, 1, 1])
-    embeds_3 = tf.concat([position_ids_3, embeds_3], axis=2)
-    return layer(embeds_3)
-
-def add_position_embedding(embeds_3, layer):
-    """
-    Takes a sequence of embeds and computes new embeds that contain relative positional information
-    embeds_3: tensor with shape [batchsize, seqlen, embedsize]
-    layer: a keras layer with a nonlinearity that combines the embedding with it's position signal
-    """
-    batchsize = tf.shape(embeds_3)[0]
-    seqlen = embeds_3.shape[1]
-    position_ids_2 = tf.one_hot(tf.range(seqlen), seqlen)
-    position_ids_3 = tf.expand_dims(position_ids_2, axis=0)
-    position_ids_3 = tf.tile(position_ids_3, [batchsize, 1, 1])
-    embeds_3 = tf.concat([position_ids_3, embeds_3], axis=2)
-    return layer(embeds_3)
 
 def run_inference(model, context_string, seqlen):
     context_string = bytes(context_string, 'utf-8')
