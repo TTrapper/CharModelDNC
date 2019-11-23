@@ -71,7 +71,9 @@ class DNCCell(tf.keras.layers.Layer):
         transformed_3 = tf.expand_dims(transformed_2, axis=1)
         memory_3 = ((1 - write_weights_3) * memory_3) + (write_weights_3 * transformed_3)
         memory_2 = tf.reshape(memory_3, [-1, self.memsize * self.units])
-        return transformed_2, [memory_2]
+        # Residual connection
+        outputs = inputs + transformed_2
+        return outputs, [memory_2]
 
 @tf.function
 def sample_logits(logits, temperature):
@@ -91,7 +93,7 @@ def run_inference(model, context_string, numpredict, temperature=1e-16):
         prediction = tf.cast(prediction, input_ids.dtype)
         input_ids = tf.concat([input_ids, prediction], axis=1)
     outstring = data_pipe.ids_to_string(input_ids)
-    print(outstring[0])
+    print(outstring[0].numpy())
 
 if __name__ == '__main__':
 #    model = make_model(seqlen)
