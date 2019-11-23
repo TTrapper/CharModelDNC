@@ -3,17 +3,17 @@ import tensorflow as tf
 
 import data_pipe
 
-def make_model():
+def make_model(batchsize):
     numclasses = 256 # assume utf-8 bytes
     layersize = 1024
     numlayers = 4
     memsize = 8
-    inputs = tf.keras.Input((None,))
+    inputs = tf.keras.Input((None,), batch_size=batchsize)
     # Embed Characters
     char_embeds_3 = tf.keras.layers.Embedding(numclasses, layersize)(inputs)
     # Sequence layers
     cells = [DNCCell(layersize, memsize) for layernum in range(numlayers)]
-    rnn = tf.keras.layers.RNN(cells, return_sequences=True, stateful=False)
+    rnn = tf.keras.layers.RNN(cells, return_sequences=True, stateful=True)
     char_embeds_3 = rnn(char_embeds_3)
     # Output layer
     logits_3 = tf.keras.layers.Dense(numclasses,  None)(char_embeds_3)
@@ -81,26 +81,37 @@ def sample_logits(logits, temperature):
     return prediction
 
 def run_inference(model, context_string, numpredict, temperature=1e-16):
+    print('----------------------------\nsoftmax temperature: {}'.format(temperature))
     context_string = bytes(context_string, 'utf-8')
     contextlen = len(context_string)
     temperature = tf.constant(temperature)
     input_ids = data_pipe.string_to_ids(tf.constant(context_string))
     input_ids = tf.expand_dims(input_ids, axis=0)
+    # Stateful layers need their batchsize to be fixed, so just passing the same input in for now.
+    input_ids = tf.tile(input_ids, [model.input_shape[0], 1])
+    result = []
     for _ in range(numpredict):
-        outputs = model.predict(input_ids, steps=1)
+        outputs = model.predict_on_batch(input_ids)
         latest_logits = outputs[:, -1, :]
         prediction = sample_logits(latest_logits, temperature)
         prediction = tf.cast(prediction, input_ids.dtype)
-        input_ids = tf.concat([input_ids, prediction], axis=1)
-    outstring = data_pipe.ids_to_string(input_ids)
-    print(outstring[0].numpy())
+        input_ids = prediction
+        result.append(prediction)
+    outstring = data_pipe.ids_to_string(tf.concat(result, axis=1))
+    context_string = str(context_string, 'utf-8')
+    for line in outstring:
+        line = str(line.numpy(), 'utf-8')
+        line = context_string + line
+        line = line.replace('\\n', '\n')
+        print(line, '\n')
 
 if __name__ == '__main__':
-#    model = make_model(seqlen)
+#    model = make_model(8)
     model = tf.keras.models.load_model('./model.hd5', custom_objects={'DNCCell':DNCCell},
         compile=True)
-    run_inference(model, 'she', 63, 1e-16)
-    run_inference(model, 'she', 63, 0.5)
-    run_inference(model, 'she', 63, 0.775)
+    numpredict = 128
+    run_inference(model, 'she', numpredict, 1e-16)
+    run_inference(model, 'she', numpredict, 0.5)
+    run_inference(model, 'she', numpredict, 0.75)
 
 

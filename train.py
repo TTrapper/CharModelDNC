@@ -21,7 +21,8 @@ def setup(restore):
         model = tf.keras.models.load_model('./model.hd5', compile=True,
             custom_objects={'DNCCell':model_def.DNCCell})
     else:
-        model = model_def.make_model()
+        batchsize = dataset.element_spec[0].shape[0]
+        model = model_def.make_model(batchsize)
         optimizer = tf.keras.optimizers.Adam(learn_rate)
         model.compile(optimizer=optimizer,
                       loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True))
@@ -29,11 +30,11 @@ def setup(restore):
     return dataset, model
 
 def train(model, dataset):
-    batchsize, seqlen = next(iter(dataset))[0].shape
     def inference_fn(batch, logs):
         if batch % 2000 == 1999:
-            model_def.run_inference(model, 'she', seqlen)
             model.save('./model.hd5', save_format='h5', overwrite=True, include_optimizer=True)
+            for softmax_temp in [1e-16, 0.5, 0.75]:
+                model_def.run_inference(model, 'she', 128, softmax_temp)
     inference_callback = tf.keras.callbacks.LambdaCallback(on_batch_end=inference_fn)
     callbacks = [inference_callback]
     model.fit(dataset, epochs=200, verbose=1, steps_per_epoch=None, use_multiprocessing=True,
@@ -43,6 +44,3 @@ if '__main__' == __name__:
     args = parseargs(parser)
     dataset, model = setup(args.restore)
     train(model, dataset)
-    _, seqlen = next(iter(dataset))[0].shape
-    model_def.run_inference(model, 'hi there', seqlen)
-
