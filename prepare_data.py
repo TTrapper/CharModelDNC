@@ -3,7 +3,7 @@ import os
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--src', type=str, required=True, help='path to dir containing text files')
-parser.add_argument('--seqlen', type=int, default=16, help='number of character bytes per line')
+parser.add_argument('--seqlen', type=int, default=2048, help='number of character bytes per line')
 
 def read_args():
     args = parser.parse_args()
