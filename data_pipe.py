@@ -9,8 +9,8 @@ def file_to_dataset():
     # Peek at the first example to get the shape and set it explicitly
     batchsize, seqlen = next(iter(lines)).shape
     lines = lines.map(lambda line: tf.reshape(line, [batchsize, seqlen]))
-    # Add a GO byte to the beginning of the sequence
-    lines = lines.map(lambda line: tf.concat([tf.zeros([batchsize, 1], line.dtype), line], axis=1))
+    # Add a GO byte to the beginning of the sequence.
+    lines = lines.map(lambda line: tf.concat([2*tf.ones([batchsize, 1], line.dtype), line], axis=1))
     # Split x,y pair which are offset by one character
     lines = lines.map(lambda line: (line[:, :-1], line[:, 1:]))
     # Split long lines into consecutive batches which can be trained with stateful RNNs
