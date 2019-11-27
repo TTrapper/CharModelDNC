@@ -8,13 +8,13 @@ def make_model(batchsize, return_state=False):
     numclasses = 256 # assume utf-8 bytes
     layersize = 1024
     numlayers = 4
-    memsize = 8
+    memsize = 32
     inputs = tf.keras.Input((None,), batch_size=batchsize)
     # Embed Characters
     char_embeds_3 = tf.keras.layers.Embedding(numclasses, layersize)(inputs)
     # Sequence layers
-    cells = [DNCCell(layersize, memsize) for layernum in range(numlayers)]
-    rnn = tf.keras.layers.RNN(cells, return_sequences=True, return_state=return_state,
+    cell = DNCCell(layersize, memsize, numlayers)
+    rnn = tf.keras.layers.RNN(cell, return_sequences=True, return_state=return_state,
             stateful=True)
     outputs = rnn(char_embeds_3)
     if return_state:
@@ -40,13 +40,16 @@ class DNCCell(tf.keras.layers.Layer):
     Arguments:
         units: Positive integer, dimensionality of the output space.
         memsize: Positive integer, mumber of memory states
+        depth: Positive integer, number of layers that will share this cell's memory.
     """
 
-    def __init__(self, units, memsize, **kwargs):
+    def __init__(self, units, memsize, depth, **kwargs):
         self.units = units
-        self.state_size = (units * memsize, memsize + 1, memsize)
+        self.state_size = (units * memsize,) +  (depth*(memsize + 1, memsize))
+        self.nested_state_size = (units * memsize, depth*((memsize + 1, memsize),))
         self.output_size = units
         self.memsize = memsize
+        self.depth = depth
         super(DNCCell, self).__init__(**kwargs)
 
     def get_config(self):
@@ -54,6 +57,7 @@ class DNCCell(tf.keras.layers.Layer):
         config.update({
             'units': self.units,
             'memsize': self.memsize,
+            'depth': self.depth
         })
         return config
 
@@ -61,30 +65,51 @@ class DNCCell(tf.keras.layers.Layer):
         if input_shape[-1] != self.units:
             raise ValueError('input size must match output size, got: {}, {}'.format(
                 input_shape[-1], self.units))
-        self.readlayer = tf.keras.layers.Dense(self.memsize + 1, tf.nn.softmax)
-        self.writelayer = tf.keras.layers.Dense(self.memsize, tf.nn.sigmoid)
-        self.transformlayer = tf.keras.layers.Dense(self.units, tf.nn.relu)
+        self.layers = []
+        for layernum in range(self.depth):
+            layer = {}
+            layer['readlayer'] = tf.keras.layers.Dense(self.memsize + 1, tf.nn.softmax)
+            layer['writelayer'] = tf.keras.layers.Dense(self.memsize, tf.nn.sigmoid)
+            layer['kernel'] = tf.keras.layers.Dense(self.units, tf.nn.relu)
+            self.layers.append(layer)
         self.built = True
 
     def call(self, inputs, states, training=False):
-        # Take the memory state from the previous step concat the current input to it
         memory_3 = tf.reshape(states[0], [-1, self.memsize, self.units])
-        value_3 = tf.expand_dims(inputs, axis=1)
-        attended_mem_3 = tf.concat([memory_3, value_3], axis=1)
+        readwrites_by_layer = []
+        for layer in self.layers:
+            outputs, memory_3, readwrites = self._runlayer(inputs,
+                    memory_3, layer)
+            readwrites_by_layer.append(readwrites)
+        memory_2 = tf.reshape(memory_3, [-1, self.memsize * self.units])
+        return outputs, [memory_2, readwrites_by_layer]
+
+    def _runlayer(self, inputs_2, memory_3, layer):
+        """
+        Process one of this cell's potentially many layers.
+        inputs_2: 2D tensor input to call or output from a previous layer
+        memory_3: The 3D memory tensor extracted from the the cell state
+        kernels: A dict containing this layer's 'readlayer', 'writelayer', and 'kernel'
+        """
+        # Take the memory state from the previous step or layer and concat the current input to it
+        inputs_3 = tf.expand_dims(inputs_2, axis=1)
+        attended_mem_3 = tf.concat([memory_3, inputs_3], axis=1)
         # Compute attention over memory
-        read_weights_2 = self.readlayer(tf.reduce_mean(attended_mem_3, axis=1))
+        read_weights_2 = layer['readlayer'](tf.reduce_mean(attended_mem_3, axis=1))
         read_weights_3 = tf.expand_dims(read_weights_2, axis=2)
         attended_mem_2 = tf.reduce_sum(read_weights_3 * attended_mem_3, axis=1)
         # Compute a new value from the attended memory
-        transformed_2 = self.transformlayer(attended_mem_2)
+        transformed_2 = layer['kernel'](attended_mem_2)
         # Write the new value to memory
-        write_weights_3 = tf.expand_dims(self.writelayer(transformed_2), axis=2)
+        write_weights_2 = layer['writelayer'](transformed_2)
+        write_weights_3 = tf.expand_dims(write_weights_2, axis=2)
         transformed_3 = tf.expand_dims(transformed_2, axis=1)
         memory_3 = ((1 - write_weights_3) * memory_3) + (write_weights_3 * transformed_3)
-        memory_2 = tf.reshape(memory_3, [-1, self.memsize * self.units])
         # Residual connection
-        outputs = inputs + transformed_2
-        return outputs, [memory_2, read_weights_2, tf.squeeze(write_weights_3, axis=2)]
+        outputs = transformed_2
+        outputs = inputs_2 + transformed_2
+        return outputs, memory_3, (read_weights_2, write_weights_2)
+
 
 @tf.function
 def sample_logits(logits, temperature):
@@ -129,7 +154,7 @@ def inspect_memory(model, input_string):
     """
     assert model.input_shape[0] == 1 # TODO support other batch sizes
     # Find out how many DNC layers the model has
-    numlayers = len(model.output_shape[1])
+    numlayers = len(model.output_shape[1][1:])//2 # FIXME this is a hard coded solution
     reads = [[] for _ in range(numlayers)]
     writes = [[] for _ in range(numlayers)]
     # Convert string to integers.
@@ -140,34 +165,38 @@ def inspect_memory(model, input_string):
         current_input = input_ids[:, idx:idx+1]
         results = model.predict_on_batch(current_input)
         # Manually extract the states and pack them into layers
-        memory_states = results[1:]
-        layered_states = [(memory_states[i: i+3]) for i in range(0, len(memory_states), 3)]
-        for layernum, layer in enumerate(layered_states):
-            reads[layernum].append(layer[1])
-            writes[layernum].append(layer[2])
+        readwrites = results[2:]
+        readwrites_by_layer = [(readwrites[i: i+2]) for i in range(0, len(readwrites), 2)]
+        for layernum, layer in enumerate(readwrites_by_layer):
+            reads[layernum].append(layer[0])
+            writes[layernum].append(layer[1])
     # Plot the weights
     layered_reads = [np.concatenate(layer, axis=0) for layer in reads]
     layered_writes = [np.concatenate(layer, axis=0) for layer in writes]
-    maxseqlen = 128
+    maxseqlen = 256
+    ticks = range(len(input_string[:maxseqlen]))
+    ticklabels = [chr(c) for c in input_string[-maxseqlen:]]
     for reads, writes in zip(layered_reads, layered_writes):
         fig, axs = plt.subplots(nrows=2)
-        ticks = range(len(input_string[:maxseqlen]))
-        ticklabels = [chr(c) for c in input_string[-maxseqlen:]]
+        yticks = range(reads.shape[1])
         axs[0].imshow(np.transpose(reads[-maxseqlen:]), cmap='gray')
+        axs[0].set_yticks(yticks, minor=False)
         axs[0].set_xticks(ticks, minor=False)
         axs[0].set_xticklabels(ticklabels, minor=False)
         axs[0].set_title('Read Weights')
         axs[1].imshow(np.transpose(writes[-maxseqlen:]), cmap='gray')
+        yticks = range(writes.shape[1])
+        axs[1].set_yticks(yticks, minor=False)
         axs[1].set_xticks(ticks, minor=False)
         axs[1].set_xticklabels(ticklabels, minor=False)
-        axs[0].set_title('Write Weights')
+        axs[1].set_title('Write Weights')
         plt.show()
 
 if __name__ == '__main__':
     # Run inference
     model = tf.keras.models.load_model('./model.h5', custom_objects={'DNCCell':DNCCell},
         compile=True)
-    numpredict = 128
+    numpredict = 512
     lines = ['This sentence is an example']
     _ = run_inference(model, 'she', numpredict, 1e-16)
     lines = run_inference(model, 'she', numpredict, 0.5)
