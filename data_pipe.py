@@ -25,14 +25,17 @@ def file_to_dataset():
         lines = lines.batch(batchsize, drop_remainder=True)
     return lines
 
-#@tf.function
+@tf.function
 def string_to_ids(tf_string):
     result = tf.strings.bytes_split(tf_string, 'UTF-8')
-    result = tf.strings.unicode_decode(result, 'UTF-8', errors='replace', replacement_char=0)
-    result = tf.squeeze(result.to_tensor())
+    # Decode raw bytes: data is preped to a fixed number of bytes per line so some valid utf-8
+    # characters may get split into invalid utf-8 bytes if they lie on the boundary.
+    result = tf.io.decode_raw(result, tf.uint8)
+    result = tf.cast(result, tf.int32)
+    result = tf.squeeze(result)
     return result
 
-#@tf.function
+@tf.function
 def ids_to_string(tensor):
     result = tf.strings.unicode_encode(tensor, 'UTF-8')
     return result

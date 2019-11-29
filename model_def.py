@@ -69,7 +69,7 @@ class DNCCell(tf.keras.layers.Layer):
         for layernum in range(self.depth):
             layer = {}
             layer['readlayer'] = tf.keras.layers.Dense(self.memsize + 1, tf.nn.softmax)
-            layer['writelayer'] = tf.keras.layers.Dense(self.memsize, tf.nn.sigmoid)
+            layer['writelayer'] = tf.keras.layers.Dense(self.memsize, tf.nn.softmax)
             layer['kernel'] = tf.keras.layers.Dense(self.units, tf.nn.relu)
             self.layers.append(layer)
         self.built = True
