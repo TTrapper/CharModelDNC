@@ -139,8 +139,7 @@ def run_inference(model, input_string, numpredict, temperature=1e-16):
         input_ids = prediction
         result.append(prediction)
     # Remove the GO byte and convert to strings
-    outstring = data_pipe.ids_to_string(tf.concat(result, axis=1)[:, 1:])
-    outstring = [str(line.numpy(), 'utf-8') for line in outstring]
+    outstring = data_pipe.ids_to_python_string(tf.concat(result, axis=1)[:, 1:])
     # Print the results for each sequence in the batch
     for line in outstring:
         print(line.replace('\\n', '\n'), '\n')
