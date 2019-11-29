@@ -37,7 +37,14 @@ def string_to_ids(tf_string):
 
 @tf.function
 def ids_to_string(tensor):
-    result = tf.strings.unicode_encode(tensor, 'UTF-8')
+    result = tf.strings.unicode_encode(tensor, 'UTF-8', errors='ignore')
+    return result
+
+def ids_to_python_string(tensor):
+    # Manually convert the ints to char bytes, then to a string. This avoids producing weird
+    # characters when a unicode sequence has been broken up.
+    result = tf.cast(tensor, tf.uint8).numpy()
+    result = [str(bytes(line), 'utf-8', 'replace') for line in result]
     return result
 
 if __name__ == '__main__':
@@ -49,10 +56,10 @@ if __name__ == '__main__':
         example = next(lines)
         x, y = example
         print(x)
-        for line in ids_to_string(x):
-            print(line.numpy())
+        for line in ids_to_python_string(x):
+            print(line)
         print(y)
-        for line in ids_to_string(y):
-            print(line.numpy())
+        for line in ids_to_python_string(y):
+            print(line)
 
 
