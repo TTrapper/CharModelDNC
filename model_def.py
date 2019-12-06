@@ -105,10 +105,7 @@ class DNCCell(tf.keras.layers.Layer):
         write_weights_3 = tf.expand_dims(write_weights_2, axis=2)
         transformed_3 = tf.expand_dims(transformed_2, axis=1)
         memory_3 = ((1 - write_weights_3) * memory_3) + (write_weights_3 * transformed_3)
-        # Residual connection
-        outputs = transformed_2
-        outputs = inputs_2 + transformed_2
-        return outputs, memory_3, (read_weights_2, write_weights_2)
+        return transformed_2, memory_3, (read_weights_2, write_weights_2)
 
 
 @tf.function
@@ -125,7 +122,8 @@ def _string_to_inputs(input_string, batchsize):
     return input_ids
 
 def run_inference(model, input_string, numpredict, temperature=1e-16):
-    print('----------------------------\nsoftmax temperature: {}'.format(temperature))
+    print('******************************************')
+    print('softmax temperature: {}'.format(temperature))
     temperature = tf.constant(temperature)
     # Convert string to integers. Prepend the start-of-text byte.
     input_string = bytes(chr(2) + input_string, 'utf-8')
@@ -143,6 +141,7 @@ def run_inference(model, input_string, numpredict, temperature=1e-16):
     # Print the results for each sequence in the batch
     for line in outstring:
         print(line.replace('\\n', '\n'), '\n')
+        print('--------------------------------------------')
     return outstring
 
 def inspect_memory(model, input_string):
@@ -175,21 +174,22 @@ def inspect_memory(model, input_string):
     maxseqlen = 256
     ticks = range(len(input_string[:maxseqlen]))
     ticklabels = [chr(c) for c in input_string[-maxseqlen:]]
-    for reads, writes in zip(layered_reads, layered_writes):
+    for layernum, (reads, writes) in enumerate(zip(layered_reads, layered_writes)):
         fig, axs = plt.subplots(nrows=2)
+        fig.suptitle('Layer {}'.format(layernum))
         yticks = range(reads.shape[1])
-        axs[0].imshow(np.transpose(reads[-maxseqlen:]), cmap='gray')
+        axs[0].imshow(np.transpose(reads[-maxseqlen:]), cmap='gray', aspect='auto')
         axs[0].set_yticks(yticks, minor=False)
         axs[0].set_xticks(ticks, minor=False)
         axs[0].set_xticklabels(ticklabels, minor=False)
         axs[0].set_title('Read Weights')
-        axs[1].imshow(np.transpose(writes[-maxseqlen:]), cmap='gray')
+        axs[1].imshow(np.transpose(writes[-maxseqlen:]), cmap='gray', aspect='auto')
         yticks = range(writes.shape[1])
         axs[1].set_yticks(yticks, minor=False)
         axs[1].set_xticks(ticks, minor=False)
         axs[1].set_xticklabels(ticklabels, minor=False)
         axs[1].set_title('Write Weights')
-        plt.show()
+    plt.show()
 
 if __name__ == '__main__':
     # Run inference
@@ -197,9 +197,10 @@ if __name__ == '__main__':
         compile=True)
     numpredict = 512
     lines = ['This sentence is an example']
-    _ = run_inference(model, 'she', numpredict, 1e-16)
-    lines = run_inference(model, 'she', numpredict, 0.5)
-    _ = run_inference(model, 'she', numpredict, 0.75)
+    context = 'she'
+    _ = run_inference(model, context, numpredict, 1e-16)
+    lines = run_inference(model, context, numpredict, 0.5)
+    _ = run_inference(model, context, numpredict, 0.75)
     # Plot the attention weights
     model = make_model(1, return_state=True)
     model.load_weights('./model.h5')
