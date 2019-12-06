@@ -1,9 +1,9 @@
 import tensorflow as tf
 
-def file_to_dataset():
+def file_to_dataset(data_fp):
     batchsize = 8
-    maxseqlen = 32
-    lines = tf.data.TextLineDataset(tf.constant('./traindata.txt'))
+    maxseqlen = 128
+    lines = tf.data.TextLineDataset(tf.constant(data_fp))
     lines = lines.map(string_to_ids)
     lines = lines.batch(batchsize, drop_remainder=True)
     # Peek at the first example to get the shape and set it explicitly
@@ -25,7 +25,6 @@ def file_to_dataset():
         lines = lines.batch(batchsize, drop_remainder=True)
     return lines
 
-@tf.function
 def string_to_ids(tf_string):
     result = tf.strings.bytes_split(tf_string, 'UTF-8')
     # Decode raw bytes: data is preped to a fixed number of bytes per line so some valid utf-8
@@ -35,7 +34,6 @@ def string_to_ids(tf_string):
     result = tf.squeeze(result)
     return result
 
-@tf.function
 def ids_to_string(tensor):
     result = tf.strings.unicode_encode(tensor, 'UTF-8', errors='ignore')
     return result
@@ -48,7 +46,7 @@ def ids_to_python_string(tensor):
     return result
 
 if __name__ == '__main__':
-    lines = file_to_dataset()
+    lines = file_to_dataset('./traindata.txt')
     print(lines)
     lines = iter(lines)
     for batch in range(4):

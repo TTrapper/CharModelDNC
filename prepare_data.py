@@ -3,6 +3,7 @@ import os
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--src', type=str, required=True, help='path to dir containing text files')
+parser.add_argument('--dst', type=str, default='./traindata.txt', help='output file path')
 parser.add_argument('--seqlen', type=int, default=2048, help='number of character bytes per line')
 parser.add_argument('--append', action='store_true', help='append to existing data file')
 
@@ -16,10 +17,9 @@ def process(srcdir, seqlen):
     """
     if not os.path.exists(srcdir):
         raise IOError('The source directory does not exist: {}'.format(srcdir))
-    outpath = './traindata.txt'
-    if not args.append and os.path.exists(outpath):
-        os.remove(outpath)
-    with open(outpath, 'ab') as outfile:
+    outpath = args.dst
+    filemode = 'ab' if args.append and os.path.exists(outpath) else 'wb'
+    with open(outpath, filemode) as outfile:
         srcdocs = os.listdir(srcdir)
         for docnum, srcdoc in enumerate(srcdocs):
             print('Processing file {} of {}'.format(1 + docnum, len(srcdocs)))
