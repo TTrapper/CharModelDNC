@@ -1,4 +1,5 @@
 import argparse
+import json
 
 import numpy as np
 import tensorflow as tf
@@ -18,13 +19,16 @@ def parseargs(parser):
 
 def setup(restore, data_fp):
     learn_rate = 1e-4
-    dataset = data_pipe.file_to_dataset(data_fp)
-    batchsize = dataset.element_spec[0].shape[0]
+    config = json.load(open('./config.json'))
+    batchsize = config['batchsize']
+    maxseqlen = config['maxseqlen']
+    numlayers = config['numlayers']
+    layersize = config['layersize']
+    memsize = config['memsize']
+    dataset = data_pipe.file_to_dataset(data_fp, batchsize, maxseqlen)
+    model = model_def.make_model(batchsize, numlayers, layersize, memsize)
     if restore:
-        model = model_def.make_model(batchsize)
         model.load_weights('./model.h5')
-    else:
-        model = model_def.make_model(batchsize)
     optimizer = tf.keras.optimizers.Adam(learn_rate)
     model.compile(optimizer=optimizer,
         loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True))

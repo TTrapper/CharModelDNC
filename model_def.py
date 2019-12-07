@@ -1,14 +1,13 @@
+import json
+
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 
 import data_pipe
 
-def make_model(batchsize, return_state=False):
+def make_model(batchsize, numlayers, layersize, memsize, return_state=False):
     numclasses = 256 # assume utf-8 bytes
-    layersize = 1024
-    numlayers = 4
-    memsize = 32
     inputs = tf.keras.Input((None,), batch_size=batchsize)
     # Embed Characters
     char_embeds_3 = tf.keras.layers.Embedding(numclasses, layersize)(inputs)
@@ -202,6 +201,8 @@ if __name__ == '__main__':
     lines = run_inference(model, context, numpredict, 0.5)
     _ = run_inference(model, context, numpredict, 0.75)
     # Plot the attention weights
-    model = make_model(1, return_state=True)
+    config = json.load(open('./config.json'))
+    model = make_model(1, config['numlayers'], config['layersize'], config['memsize'],
+            return_state=True)
     model.load_weights('./model.h5')
     inspect_memory(model, lines[0])

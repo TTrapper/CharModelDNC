@@ -1,8 +1,6 @@
 import tensorflow as tf
 
-def file_to_dataset(data_fp):
-    batchsize = 8
-    maxseqlen = 128
+def file_to_dataset(data_fp, batchsize, maxseqlen):
     lines = tf.data.TextLineDataset(tf.constant(data_fp))
     lines = lines.map(string_to_ids)
     lines = lines.batch(batchsize, drop_remainder=True)
@@ -46,7 +44,9 @@ def ids_to_python_string(tensor):
     return result
 
 if __name__ == '__main__':
-    lines = file_to_dataset('./traindata.txt')
+    batchsize = 8
+    maxseqlen = 16
+    lines = file_to_dataset('./traindata.txt', batchsize, maxseqlen)
     print(lines)
     lines = iter(lines)
     for batch in range(4):
