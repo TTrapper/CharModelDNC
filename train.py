@@ -24,9 +24,10 @@ def setup(restore, data_fp):
     maxseqlen = config['maxseqlen']
     numlayers = config['numlayers']
     layersize = config['layersize']
+    numheads = config['numheads']
     memsize = config['memsize']
     dataset = data_pipe.file_to_dataset(data_fp, batchsize, maxseqlen)
-    model = model_def.make_model(batchsize, numlayers, layersize, memsize)
+    model = model_def.make_model(batchsize, numlayers, layersize, memsize, numheads)
     if restore:
         model.load_weights('./model.h5')
     optimizer = tf.keras.optimizers.Adam(learn_rate)
@@ -40,7 +41,8 @@ def train(model, dataset):
         if batch % 2000 == 200:
             model.save('./model.h5', save_format='h5', overwrite=True, include_optimizer=True)
             for softmax_temp in [1e-16, 0.5, 0.75]:
-                model_def.run_inference(model, 'she', 512, softmax_temp)
+                context = 'she' #'])|(['
+                model_def.run_inference(model, context, 512, softmax_temp)
     inference_callback = tf.keras.callbacks.LambdaCallback(on_batch_end=inference_fn)
     callbacks = [inference_callback]
     model.fit(dataset, epochs=200, verbose=1, steps_per_epoch=None, use_multiprocessing=True,

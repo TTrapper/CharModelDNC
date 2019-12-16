@@ -6,13 +6,13 @@ import tensorflow as tf
 
 import data_pipe
 
-def make_model(batchsize, numlayers, layersize, memsize, return_state=False):
+def make_model(batchsize, numlayers, layersize, memsize, numheads, return_state=False):
     numclasses = 256 # assume utf-8 bytes
     inputs = tf.keras.Input((None,), batch_size=batchsize)
     # Embed Characters
     char_embeds_3 = tf.keras.layers.Embedding(numclasses, layersize)(inputs)
     # Sequence layers
-    cell = DNCCell(layersize, memsize, numlayers)
+    cell = DNCCell(layersize, memsize, numlayers, numheads)
     rnn = tf.keras.layers.RNN(cell, return_sequences=True, return_state=return_state,
             stateful=True)
     outputs = rnn(char_embeds_3)
@@ -38,14 +38,22 @@ class DNCCell(tf.keras.layers.Layer):
 
     Arguments:
         units: Positive integer, dimensionality of the output space.
+        numheads: Positive integer, number of read/write attention heads per memory state
         memsize: Positive integer, mumber of memory states
         depth: Positive integer, number of layers that will share this cell's memory.
     """
 
-    def __init__(self, units, memsize, depth, **kwargs):
+    def __init__(self, units, memsize, depth, numheads, **kwargs):
+        if units % numheads != 0:
+            raise ValueError('The number of attention heads must evenly divide the number of units'
+                    '(got units:{}, numheads:{})'.format(units, numheads))
         self.units = units
-        self.state_size = (units * memsize,) +  (depth*(memsize + 1, memsize))
-        self.nested_state_size = (units * memsize, depth*((memsize + 1, memsize),))
+        self.numheads = numheads
+        self.headsize = units // numheads
+        self.state_size = (units * memsize,) +\
+                (depth * (numheads * (memsize + 1), numheads * memsize))
+        self.nested_state_size = (units * memsize,
+                depth * ((numheads * (memsize + 1), numheads * memsize),))
         self.output_size = units
         self.memsize = memsize
         self.depth = depth
@@ -54,6 +62,7 @@ class DNCCell(tf.keras.layers.Layer):
     def get_config(self):
         config = super().get_config().copy()
         config.update({
+            'numheads': self.numheads,
             'units': self.units,
             'memsize': self.memsize,
             'depth': self.depth
@@ -67,45 +76,57 @@ class DNCCell(tf.keras.layers.Layer):
         self.layers = []
         for layernum in range(self.depth):
             layer = {}
-            layer['readlayer'] = tf.keras.layers.Dense(self.memsize + 1, tf.nn.softmax)
-            layer['writelayer'] = tf.keras.layers.Dense(self.memsize, tf.nn.softmax)
+            layer['readlayer'] = tf.keras.layers.Dense(self.numheads * (self.memsize + 1), None)
+            layer['writelayer'] = tf.keras.layers.Dense(self.numheads * self.memsize, None)
             layer['kernel'] = tf.keras.layers.Dense(self.units, tf.nn.relu)
             self.layers.append(layer)
         self.built = True
 
     def call(self, inputs, states, training=False):
-        memory_3 = tf.reshape(states[0], [-1, self.memsize, self.units])
+        memory_4 = tf.reshape(states[0], [-1, self.memsize, self.numheads, self.headsize])
         readwrites_by_layer = []
         for layer in self.layers:
-            outputs, memory_3, readwrites = self._runlayer(inputs,
-                    memory_3, layer)
+            outputs, memory_4, readwrites = self._runlayer(inputs,
+                    memory_4, layer)
             readwrites_by_layer.append(readwrites)
-        memory_2 = tf.reshape(memory_3, [-1, self.memsize * self.units])
+        memory_2 = tf.reshape(memory_4, [-1, self.memsize * self.units])
         return outputs, [memory_2, readwrites_by_layer]
 
-    def _runlayer(self, inputs_2, memory_3, layer):
+    def _runlayer(self, inputs_2, memory_4, layer):
         """
         Process one of this cell's potentially many layers.
         inputs_2: 2D tensor input to call or output from a previous layer
-        memory_3: The 3D memory tensor extracted from the the cell state
+        memory_4: The 4D memory tensor extracted from the the cell state
         kernels: A dict containing this layer's 'readlayer', 'writelayer', and 'kernel'
         """
         # Take the memory state from the previous step or layer and concat the current input to it
-        inputs_3 = tf.expand_dims(inputs_2, axis=1)
-        attended_mem_3 = tf.concat([memory_3, inputs_3], axis=1)
+        inputs_4 = tf.reshape(inputs_2, [-1, 1, self.numheads, self.headsize])
+        attended_mem_4 = tf.concat([memory_4, inputs_4], axis=1)
         # Compute attention over memory
-        read_weights_2 = layer['readlayer'](tf.reduce_mean(attended_mem_3, axis=1))
-        read_weights_3 = tf.expand_dims(read_weights_2, axis=2)
-        attended_mem_2 = tf.reduce_sum(read_weights_3 * attended_mem_3, axis=1)
+        memstate_2 = tf.reshape(attended_mem_4, [-1, self.memsize + 1, self.units])
+        memstate_2 = tf.reduce_mean(memstate_2, axis=1)
+        read_weights_2 = layer['readlayer'](memstate_2)
+        read_weights_4, read_weights_2 = self._process_heads(read_weights_2)
+        attended_mem_4 *= read_weights_4
+        attended_mem_3 = tf.reshape(attended_mem_4, [-1, self.memsize + 1, self.units])
         # Compute a new value from the attended memory
-        transformed_2 = layer['kernel'](attended_mem_2)
+        new_memval_2 = layer['kernel'](tf.reduce_sum(attended_mem_3, axis=1))
         # Write the new value to memory
-        write_weights_2 = layer['writelayer'](transformed_2)
-        write_weights_3 = tf.expand_dims(write_weights_2, axis=2)
-        transformed_3 = tf.expand_dims(transformed_2, axis=1)
-        memory_3 = ((1 - write_weights_3) * memory_3) + (write_weights_3 * transformed_3)
-        return transformed_2, memory_3, (read_weights_2, write_weights_2)
+        write_weights_2 = layer['writelayer'](new_memval_2)
+        write_weights_4, write_weights_2 = self._process_heads(write_weights_2, False)
+        new_memval_4 = tf.reshape(new_memval_2, [-1, 1, self.numheads, self.units//self.numheads])
+        memory_4 = ((1 - write_weights_4) * memory_4) + (write_weights_4 * new_memval_4)
+        return new_memval_2, memory_4, (read_weights_2, write_weights_2)
 
+    def _process_heads(self, weights_2, read=True):
+        """
+        Takes flattened read/write logits and seperately applies softmax to each read/write head
+        """
+        numitems = self.memsize + 1 if read else self.memsize
+        weights_3 = tf.reshape(weights_2, [-1, numitems, self.numheads])
+        weights_3 = tf.nn.softmax(weights_3, axis=1)
+        weights_2 = tf.reshape(weights_3, [-1, numitems * self.numheads])
+        return tf.expand_dims(weights_3, axis=3), weights_2
 
 @tf.function
 def sample_logits(logits, temperature):
@@ -121,8 +142,9 @@ def _string_to_inputs(input_string, batchsize):
     return input_ids
 
 def run_inference(model, input_string, numpredict, temperature=1e-16):
-    print('******************************************')
+    print('\n******************************************')
     print('softmax temperature: {}'.format(temperature))
+    print('******************************************\n')
     temperature = tf.constant(temperature)
     # Convert string to integers. Prepend the start-of-text byte.
     input_string = bytes(chr(2) + input_string, 'utf-8')
@@ -190,8 +212,10 @@ def inspect_memory(model, input_string):
         axs[1].set_title('Write Weights')
     plt.show()
 
+
 if __name__ == '__main__':
     # Run inference
+    config = json.load(open('./config.json'))
     model = tf.keras.models.load_model('./model.h5', custom_objects={'DNCCell':DNCCell},
         compile=True)
     numpredict = 512
@@ -203,6 +227,6 @@ if __name__ == '__main__':
     # Plot the attention weights
     config = json.load(open('./config.json'))
     model = make_model(1, config['numlayers'], config['layersize'], config['memsize'],
-            return_state=True)
+            config['numheads'], return_state=True)
     model.load_weights('./model.h5')
     inspect_memory(model, lines[0])

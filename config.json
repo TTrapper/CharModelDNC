@@ -1,5 +1,6 @@
 {"layersize": 1024,
  "numlayers": 8,
  "memsize":8,
+ "numheads":32,
  "batchsize":8,
  "maxseqlen":128}
