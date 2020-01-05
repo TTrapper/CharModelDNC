@@ -1,3 +1,6 @@
+#import os
+#os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
 import json
 
 import matplotlib.pyplot as plt
@@ -74,6 +77,7 @@ class DNCCell(tf.keras.layers.Layer):
             raise ValueError('input size must match output size, got: {}, {}'.format(
                 input_shape[-1], self.units))
         self.layers = []
+        self.normlayer = tf.keras.layers.LayerNormalization()
         for layernum in range(self.depth):
             layer = {}
             layer['readlayer'] = tf.keras.layers.Dense(self.numheads * (self.memsize + 1), None)
@@ -85,9 +89,9 @@ class DNCCell(tf.keras.layers.Layer):
     def call(self, inputs, states, training=False):
         memory_4 = tf.reshape(states[0], [-1, self.memsize, self.numheads, self.headsize])
         readwrites_by_layer = []
+        inputs = self.normlayer(inputs)
         for layer in self.layers:
-            outputs, memory_4, readwrites = self._runlayer(inputs,
-                    memory_4, layer)
+            outputs, memory_4, readwrites = self._runlayer(inputs, memory_4, layer)
             readwrites_by_layer.append(readwrites)
         memory_2 = tf.reshape(memory_4, [-1, self.memsize * self.units])
         return outputs, [memory_2, readwrites_by_layer]
@@ -111,6 +115,7 @@ class DNCCell(tf.keras.layers.Layer):
         attended_mem_3 = tf.reshape(attended_mem_4, [-1, self.memsize + 1, self.units])
         # Compute a new value from the attended memory
         new_memval_2 = layer['kernel'](tf.reduce_sum(attended_mem_3, axis=1))
+        new_memval_2 = self.normlayer(new_memval_2)
         # Write the new value to memory
         write_weights_2 = layer['writelayer'](new_memval_2)
         write_weights_4, write_weights_2 = self._process_heads(write_weights_2, False)
@@ -160,7 +165,8 @@ def run_inference(model, input_string, numpredict, temperature=1e-16):
     # Remove the GO byte and convert to strings
     outstring = data_pipe.ids_to_python_string(tf.concat(result, axis=1)[:, 1:])
     # Print the results for each sequence in the batch
-    for line in outstring:
+    max_numlines = 8
+    for line in outstring[:max_numlines]:
         print(line.replace('\\n', '\n'), '\n')
         print('--------------------------------------------')
     return outstring
@@ -190,8 +196,8 @@ def inspect_memory(model, input_string):
             reads[layernum].append(layer[0])
             writes[layernum].append(layer[1])
     # Plot the weights
-    layered_reads = [np.concatenate(layer, axis=0) for layer in reads]
-    layered_writes = [np.concatenate(layer, axis=0) for layer in writes]
+    layered_reads = np.stack([np.concatenate(layer, axis=0) for layer in reads])
+    layered_writes = np.stack([np.concatenate(layer, axis=0) for layer in writes])
     maxseqlen = 256
     ticks = range(len(input_string[:maxseqlen]))
     ticklabels = [chr(c) for c in input_string[-maxseqlen:]]
@@ -210,7 +216,7 @@ def inspect_memory(model, input_string):
         axs[1].set_xticks(ticks, minor=False)
         axs[1].set_xticklabels(ticklabels, minor=False)
         axs[1].set_title('Write Weights')
-    plt.show()
+        plt.show()
 
 
 if __name__ == '__main__':
