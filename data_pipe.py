@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-def file_to_dataset(data_fp, batchsize, maxseqlen):
+def file_to_dataset(data_fp, batchsize, maxseqlen, maskinputs=True):
     lines = tf.data.TextLineDataset(tf.constant(data_fp))
     lines = lines.map(string_to_ids)
     lines = lines.batch(batchsize, drop_remainder=True)
@@ -21,7 +21,16 @@ def file_to_dataset(data_fp, batchsize, maxseqlen):
         lines = lines.map(lambda x,y: (tf.reshape(x, [-1, maxseqlen]), tf.reshape(y, [-1, maxseqlen])))
         lines = lines.unbatch()
         lines = lines.batch(batchsize, drop_remainder=True)
+    if maskinputs:
+        # Randomly mask some of the input values
+        lines = lines.map(lambda x,y: (randomly_mask(x), y))
     return lines
+
+def randomly_mask(tensor):
+    maskprob = 0.10
+    mask = tf.random.uniform(tensor.shape, minval=0, maxval=1, dtype=tf.dtypes.float32)
+    mask = tf.where(tf.less(mask, maskprob), tf.zeros_like(mask), tf.ones_like(mask))
+    return tensor * tf.cast(mask, tensor.dtype)
 
 def string_to_ids(tf_string):
     result = tf.strings.bytes_split(tf_string, 'UTF-8')
@@ -55,7 +64,7 @@ if __name__ == '__main__':
         x, y = example
         print(x)
         for line in ids_to_python_string(x):
-            print(line)
+            print(line.replace(chr(0), '_'))
         print(y)
         for line in ids_to_python_string(y):
             print(line)

@@ -17,7 +17,7 @@ def parseargs(parser):
     args = parser.parse_args()
     return args
 
-def setup(restore, data_fp):
+def setup(restore, data_fp, evalmode):
     learn_rate = 1e-4
     config = json.load(open('./config.json'))
     batchsize = config['batchsize']
@@ -26,7 +26,8 @@ def setup(restore, data_fp):
     layersize = config['layersize']
     numheads = config['numheads']
     memsize = config['memsize']
-    dataset = data_pipe.file_to_dataset(data_fp, batchsize, maxseqlen)
+    maskinputs = not evalmode
+    dataset = data_pipe.file_to_dataset(data_fp, batchsize, maxseqlen, maskinputs)
     model = model_def.make_model(batchsize, numlayers, layersize, memsize, numheads)
     if restore:
         model.load_weights('./model.h5')
@@ -53,7 +54,7 @@ def evaluate(model, dataset):
 
 if '__main__' == __name__:
     args = parseargs(parser)
-    dataset, model = setup(args.restore, args.data_fp)
+    dataset, model = setup(args.restore, args.data_fp, args.eval)
     if args.eval:
         evaluate(model, dataset)
     else:
