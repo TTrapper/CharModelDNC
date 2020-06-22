@@ -9,6 +9,6 @@ tensorflow 2
 
 ## Get started
 ```
-python prepare_data.py --src example_data/
+cat example_data/* > traindata.txt
 python train.py
 ```
