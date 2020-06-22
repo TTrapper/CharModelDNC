@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 
 import numpy as np
 import tensorflow as tf
@@ -25,25 +26,25 @@ def setup(restore, data_fp, evalmode):
     numlayers = config['numlayers']
     layersize = config['layersize']
     numheads = config['numheads']
-    memsize = config['memsize']
+    model = model_def.make_model(batchsize, maxseqlen, numlayers, layersize, numheads)
     maskinputs = not evalmode
     dataset = data_pipe.file_to_dataset(data_fp, batchsize, maxseqlen, maskinputs)
-    model = model_def.make_model(batchsize, numlayers, layersize, memsize, numheads)
     if restore:
         model.load_weights('./model.h5')
     optimizer = tf.keras.optimizers.Adam(learn_rate)
     model.compile(optimizer=optimizer,
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True))
+        loss=[tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+              tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)])
     model.summary()
     return dataset, model
 
 def train(model, dataset):
     def inference_fn(batch, logs):
-        if batch % 2000 == 200:
+        if batch % 7000 == 200:
             model.save('./model.h5', save_format='h5', overwrite=True, include_optimizer=True)
             for softmax_temp in [1e-16, 0.5, 0.75]:
-                context = 'she' #'])|(['
-                model_def.run_inference(model, context, 512, softmax_temp)
+                context = ' '
+#                model_def.run_inference(model, context, 512, softmax_temp)
     inference_callback = tf.keras.callbacks.LambdaCallback(on_batch_end=inference_fn)
     callbacks = [inference_callback]
     model.fit(dataset, epochs=200, verbose=1, steps_per_epoch=None, use_multiprocessing=True,

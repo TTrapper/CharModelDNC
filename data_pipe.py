@@ -1,36 +1,58 @@
+import model_def
+
+import os
+#os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+import random
 import tensorflow as tf
 
-def file_to_dataset(data_fp, batchsize, maxseqlen, maskinputs=True):
-    lines = tf.data.TextLineDataset(tf.constant(data_fp))
-    lines = lines.map(string_to_ids)
+def make_example_generator(filepath, seqlen):
+    total_bytes = os.path.getsize(filepath)
+    num_examples = total_bytes
+    def example_generator():
+        for i in range(num_examples):
+            start = random.randint(0, total_bytes - seqlen)
+            with open(filepath, 'rb') as f:
+                f.seek(start)
+                seq = f.read(seqlen)
+                yield seq
+    return example_generator
+
+def file_to_dataset(filepath, batchsize, maxseqlen, maskinputs=True):
+    seqlen = maxseqlen
+    example_generator = make_example_generator(filepath, 1 + seqlen)
+    lines = tf.data.Dataset.from_generator(example_generator, tf.string, tf.TensorShape([]))
+    lines = lines.prefetch(128)
+    lines = lines.map(lambda line: string_to_ids(line))
+    lines = lines.map(lambda line: tf.reshape(line, [seqlen + 1])) # explicitly sets the shape
     lines = lines.batch(batchsize, drop_remainder=True)
-    # Peek at the first example to get the shape and set it explicitly
-    batchsize, seqlen = next(iter(lines)).shape
-    lines = lines.map(lambda line: tf.reshape(line, [batchsize, seqlen]))
-    # Add a GO byte to the beginning of the sequence.
-    lines = lines.map(lambda line: tf.concat([2*tf.ones([batchsize, 1], line.dtype), line], axis=1))
-    # Split x,y pair which are offset by one character
-    lines = lines.map(lambda line: (line[:, :-1], line[:, 1:]))
-    # Split long lines into consecutive batches which can be trained with stateful RNNs
-    if seqlen > maxseqlen:
-        if seqlen % maxseqlen != 0:
-            raise ValueError('The maxseqlen must evenly divide the length of the lines in the input '
-                'file, got maxseqlen:{} seqlen:{}'.format(maxseqlen, seqlen))
-        nsplits = seqlen // maxseqlen
-        lines = lines.map(lambda x,y: (tf.split(x, nsplits, axis=1), tf.split(y, nsplits, axis=1)))
-        lines = lines.map(lambda x,y: (tf.reshape(x, [-1, maxseqlen]), tf.reshape(y, [-1, maxseqlen])))
-        lines = lines.unbatch()
-        lines = lines.batch(batchsize, drop_remainder=True)
+    lines = lines.map(lambda line: (line[:, :-1], line[:, -1:]))
+    lines = lines.map(lambda x,y: (x, (y, x)))
     if maskinputs:
         # Randomly mask some of the input values
         lines = lines.map(lambda x,y: (randomly_mask(x), y))
+        lines = lines.map(lambda x,y: (randomly_sequence_mask(x), y))
+    lines = lines.prefetch(128)
     return lines
 
 def randomly_mask(tensor):
-    maskprob = 0.10
+    maskprob = 0.20
     mask = tf.random.uniform(tensor.shape, minval=0, maxval=1, dtype=tf.dtypes.float32)
     mask = tf.where(tf.less(mask, maskprob), tf.zeros_like(mask), tf.ones_like(mask))
     return tensor * tf.cast(mask, tensor.dtype)
+
+def randomly_sequence_mask(tensor):
+    """
+    Mask the first N characters of the first P examples in the batch, where N is uniformly sampled
+    from range(0, len(example)) for each example, and P is a constant where 0 <= P <= batchsize.
+    """
+    percent_masked = 0.25 # proportion of batch elements that will have a mask applied
+    batchsize, maxlen = tensor.shape
+    num_masked = tf.cast(percent_masked * tf.cast(batchsize, tf.float32), tf.int32)
+    lengths = tf.random.uniform(shape=[num_masked], minval=0, maxval=maxlen, dtype=tf.int32)
+    lengths = tf.concat([lengths, tf.zeros([batchsize - num_masked], dtype=lengths.dtype)], axis=0)
+    mask = tf.sequence_mask(lengths, maxlen=maxlen)
+    return tf.where(mask, tf.ones_like(tensor), tensor)
+
 
 def string_to_ids(tf_string):
     result = tf.strings.bytes_split(tf_string, 'UTF-8')
@@ -53,20 +75,22 @@ def ids_to_python_string(tensor):
     return result
 
 if __name__ == '__main__':
-    batchsize = 8
-    maxseqlen = 16
+    batchsize = 10
+    maxseqlen = 32
     lines = file_to_dataset('./traindata.txt', batchsize, maxseqlen)
     print(lines)
     lines = iter(lines)
-    for batch in range(4):
-        print('\nbatch: {}'.format(batch))
+    for batch in range(5):
+        print('\n\n\nbatch: {}'.format(batch))
         example = next(lines)
-        x, y = example
+        x, (y, reconstruct) = example
         print(x)
-        for line in ids_to_python_string(x):
-            print(line.replace(chr(0), '_'))
         print(y)
-        for line in ids_to_python_string(y):
-            print(line)
-
+        for x, y, reconstruct in zip(ids_to_python_string(x), ids_to_python_string(y),
+                ids_to_python_string(reconstruct)):
+            print(x.replace(chr(0), '_'))
+            print(reconstruct)
+            print(y)
+            print('---------------------------------------')
+        print('=======================================')
 

@@ -1,43 +1,66 @@
-#import os
-#os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import json
-
-import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
-
 import data_pipe
 
-def make_model(batchsize, numlayers, layersize, memsize, numheads, return_state=False):
+def make_model(batchsize, seqlen, numlayers, layersize, numheads):
     numclasses = 256 # assume utf-8 bytes
-    inputs = tf.keras.Input((None,), batch_size=batchsize)
+    char_embed_size = 32
+    chars_per_slot = layersize // char_embed_size
+    assert seqlen % chars_per_slot == 0
+    num_in_slots = seqlen // chars_per_slot
     # Embed Characters
-    char_embeds_3 = tf.keras.layers.Embedding(numclasses, layersize)(inputs)
-    # Sequence layers
-    cell = DNCCell(layersize, memsize, numlayers, numheads)
-    rnn = tf.keras.layers.RNN(cell, return_sequences=True, return_state=return_state,
-            stateful=True)
-    outputs = rnn(char_embeds_3)
-    if return_state:
-        char_embeds_3 = outputs[0]
-        memory_states = tuple(outputs[1:])
-    else:
-        char_embeds_3 = outputs
-    # Output layer
-    logits_3 = tf.keras.layers.Dense(numclasses,  None)(char_embeds_3)
+    char_ids_2 = tf.keras.Input(shape=(seqlen), batch_size=batchsize)
+    char_embeds_3 = tf.keras.layers.Embedding(numclasses, char_embed_size)(char_ids_2)
+    # Convolution
+    char_embeds_3 = tf.keras.layers.LayerNormalization()(char_embeds_3)
+    char_embeds_3 = tf.keras.layers.Conv1D(filters=char_embed_size, kernel_size=3, strides=1,
+            padding='same', data_format='channels_last', dilation_rate=1,
+            activation=tf.nn.relu)(char_embeds_3)
+    char_embeds_3 = tf.keras.layers.LayerNormalization()(char_embeds_3)
+    # Attach some extra values to the inputs to act as a extra memory slots for the DNC
+    num_extra_slots = 1
+    extra_slots = tf.zeros([batchsize, num_extra_slots * chars_per_slot, char_embed_size])
+    char_embeds_3 = tf.concat([extra_slots, char_embeds_3], axis=1)
+    num_in_slots += num_extra_slots
+    # DNC layers
+    # TODO: no longer processed as a sequence, move layers out of an RNN cell
+    char_embeds_3 = tf.reshape(char_embeds_3, [batchsize, 1, num_in_slots * layersize])
+    cell = DNCCell(layersize, num_in_slots, numlayers, numheads)
+    rnn = tf.keras.layers.RNN(cell, return_sequences=True, return_state=True, stateful=False)
+    out = rnn(char_embeds_3)
+    forward = out[0] # to predict next char
+    reconstruct = out[1] # to predicts the masked inputs
+
+    # Reconstruct the masked input characters
+    reconstruct = tf.reshape(reconstruct, [batchsize, num_in_slots, numheads * char_embed_size])
+    reconstruct = reconstruct[:, num_extra_slots:, :] # Remove the extra memory slots
+    reconstruct = tf.keras.layers.Dense(numheads * char_embed_size, tf.nn.relu)(reconstruct)
+    reconstruct = tf.reshape(reconstruct, [batchsize, seqlen, char_embed_size])
+    reconstruct = tf.keras.layers.Dense(numclasses, None)(reconstruct)
+    # Mask the logits that don't correspond to masked inputs
+    mask = char_ids_2 == 0
+    mask = tf.tile(tf.expand_dims(mask, axis=2), [1, 1, numclasses])
+    reconstruct = tf.where(mask, reconstruct, tf.zeros_like(reconstruct))
+    reconstruct = tf.keras.layers.Masking()(reconstruct)
+
+    # Predict ahead one character
+    forward = tf.keras.layers.Dense(layersize, tf.nn.relu)(forward) # batch, 1, layersize
+    forward = tf.keras.layers.Dropout(rate=0.1)(forward)
+    logits_3 = tf.keras.layers.Dense(numclasses, None)(forward)
+
     # Model
-    if return_state:
-        model = tf.keras.Model(inputs=inputs, outputs=(logits_3, (memory_states)))
-        return model
-    else:
-        model = tf.keras.Model(inputs=inputs, outputs=logits_3)
-        return model
+    model = tf.keras.Model(inputs=char_ids_2, outputs=(logits_3, reconstruct))
+    return model
+
 
 class DNCCell(tf.keras.layers.Layer):
     """
-    A dumbed down version of a differentiable neural computer. At each timestep it reads from
-    memory, computes a new outputvalue, and writes to memory.
+    A cross between a transformer and differentiable neural computer. Conceptually, it arranges a
+    sequence of inputs as a 2D grid of memory slots. Each layer uses attention to selectively
+    read from and write to the memory slots.
 
     Arguments:
         units: Positive integer, dimensionality of the output space.
@@ -53,11 +76,8 @@ class DNCCell(tf.keras.layers.Layer):
         self.units = units
         self.numheads = numheads
         self.headsize = units // numheads
-        self.state_size = (units * memsize,) +\
-                (depth * (numheads * (memsize + 1), numheads * memsize))
-        self.nested_state_size = (units * memsize,
-                depth * ((numheads * (memsize + 1), numheads * memsize),))
-        self.output_size = units
+        self.state_size = (units * memsize,)
+        self.output_size = (units, units)
         self.memsize = memsize
         self.depth = depth
         super(DNCCell, self).__init__(**kwargs)
@@ -73,65 +93,80 @@ class DNCCell(tf.keras.layers.Layer):
         return config
 
     def build(self, input_shape):
-        if input_shape[-1] != self.units:
-            raise ValueError('input size must match output size, got: {}, {}'.format(
+        if input_shape[-1] % self.units != 0:
+            raise ValueError('input size must evenly divide the output size, got: {}, {}'.format(
                 input_shape[-1], self.units))
+        if input_shape[-1] // self.units != self.memsize:
+            raise ValueError('The specified number of input slots does not match the input size: '\
+                    + 'got: {}, {}'.format(self.memsize, input_shape[-1] // self.units))
         self.layers = []
         self.normlayer = tf.keras.layers.LayerNormalization()
         for layernum in range(self.depth):
             layer = {}
-            layer['readlayer'] = tf.keras.layers.Dense(self.numheads * (self.memsize + 1), None)
+            num_read_slots = self.memsize
+            layer['readlayer'] = tf.keras.layers.Dense(self.numheads * num_read_slots, None)
             layer['writelayer'] = tf.keras.layers.Dense(self.numheads * self.memsize, None)
             layer['kernel'] = tf.keras.layers.Dense(self.units, tf.nn.relu)
+            layer['project'] = tf.keras.layers.Dense(self.units, tf.nn.relu)
             self.layers.append(layer)
+        self.readout = tf.keras.layers.Dense(self.numheads * self.memsize, None)
         self.built = True
 
     def call(self, inputs, states, training=False):
         memory_4 = tf.reshape(states[0], [-1, self.memsize, self.numheads, self.headsize])
-        readwrites_by_layer = []
-        inputs = self.normlayer(inputs)
-        for layer in self.layers:
-            outputs, memory_4, readwrites = self._runlayer(inputs, memory_4, layer)
-            readwrites_by_layer.append(readwrites)
+        inputs = tf.reshape(inputs, [-1, self.memsize, self.numheads, self.headsize])
+        memory_4 += inputs
+        # Reshape and transform so that each head contains a contiguous subsequence
+        memory_4 = tf.reshape(memory_4, [-1, self.numheads, self.memsize, self.headsize])
+        memory_4 = tf.transpose(memory_4, [0, 2, 1, 3]) # batch, memsize, heads, headsize
+        for layernum, layer in enumerate(self.layers):
+            # Return inputs to their original sequence for the second half of the layers
+            if layernum == len(self.layers) // 2:
+                memory_4 = tf.transpose(memory_4, [0, 2, 1, 3]) # batch, heads, memsize, headsize
+                memory_4 = tf.reshape(memory_4, [-1, self.memsize, self.numheads, self.headsize])
+            outputs, memory_4 = self._runlayer(memory_4, layer)
+        out = self._read_memory(memory_4, readlayer=self.readout)
         memory_2 = tf.reshape(memory_4, [-1, self.memsize * self.units])
-        return outputs, [memory_2, readwrites_by_layer]
+        return out, memory_2
 
-    def _runlayer(self, inputs_2, memory_4, layer):
+    def _runlayer(self, memory_4, layer):
         """
         Process one of this cell's potentially many layers.
-        inputs_2: 2D tensor input to call or output from a previous layer
         memory_4: The 4D memory tensor extracted from the the cell state
         kernels: A dict containing this layer's 'readlayer', 'writelayer', and 'kernel'
         """
-        # Take the memory state from the previous step or layer and concat the current input to it
-        inputs_4 = tf.reshape(inputs_2, [-1, 1, self.numheads, self.headsize])
-        attended_mem_4 = tf.concat([memory_4, inputs_4], axis=1)
-        # Compute attention over memory
-        memstate_2 = tf.reshape(attended_mem_4, [-1, self.memsize + 1, self.units])
-        memstate_2 = tf.reduce_mean(memstate_2, axis=1)
-        read_weights_2 = layer['readlayer'](memstate_2)
-        read_weights_4, read_weights_2 = self._process_heads(read_weights_2)
-        attended_mem_4 *= read_weights_4
-        attended_mem_3 = tf.reshape(attended_mem_4, [-1, self.memsize + 1, self.units])
+        attended_mem_2 = self._read_memory(memory_4, layer['readlayer'])
         # Compute a new value from the attended memory
-        new_memval_2 = layer['kernel'](tf.reduce_sum(attended_mem_3, axis=1))
+        new_memval_2 = layer['kernel'](attended_mem_2)
+        new_memval_2 = tf.keras.layers.Dropout(rate=0.1)(new_memval_2)
+        new_memval_2 = layer['project'](new_memval_2)
         new_memval_2 = self.normlayer(new_memval_2)
         # Write the new value to memory
         write_weights_2 = layer['writelayer'](new_memval_2)
-        write_weights_4, write_weights_2 = self._process_heads(write_weights_2, False)
+        write_weights_4 = self._process_heads(write_weights_2, self.memsize)
         new_memval_4 = tf.reshape(new_memval_2, [-1, 1, self.numheads, self.units//self.numheads])
         memory_4 = ((1 - write_weights_4) * memory_4) + (write_weights_4 * new_memval_4)
-        return new_memval_2, memory_4, (read_weights_2, write_weights_2)
+        return new_memval_2, memory_4
 
-    def _process_heads(self, weights_2, read=True):
+    def _read_memory(self, memory_4, readlayer):
+        # Get average over memory slots
+        memory_2 = tf.reshape(tf.reduce_mean(memory_4, axis=1), [-1, self.units])
+        # Compute read weights from the average mem values
+        read_weights_2 = readlayer(memory_2)
+        read_weights_4 = self._process_heads(read_weights_2, self.memsize)
+        # Apply read weights to each memory slot and reduce to a single value
+        memory_4 *= read_weights_4
+        attended_mem_3 = tf.reshape(memory_4, [-1, self.memsize, self.units])
+        return tf.reduce_sum(attended_mem_3, axis=1)
+
+    def _process_heads(self, weights_2, numitems):
         """
         Takes flattened read/write logits and seperately applies softmax to each read/write head
         """
-        numitems = self.memsize + 1 if read else self.memsize
         weights_3 = tf.reshape(weights_2, [-1, numitems, self.numheads])
         weights_3 = tf.nn.softmax(weights_3, axis=1)
-        weights_2 = tf.reshape(weights_3, [-1, numitems * self.numheads])
-        return tf.expand_dims(weights_3, axis=3), weights_2
+        return tf.expand_dims(weights_3, axis=3)
+
 
 @tf.function
 def sample_logits(logits, temperature):
@@ -152,18 +187,24 @@ def run_inference(model, input_string, numpredict, temperature=1e-16):
     print('******************************************\n')
     temperature = tf.constant(temperature)
     # Convert string to integers. Prepend the start-of-text byte.
-    input_string = bytes(chr(2) + input_string, 'utf-8')
-    input_ids = _string_to_inputs(input_string, model.input_shape[0])
+    input_string = bytes(' ' + input_string, 'utf-8')
+    batchsize = model.input_shape[0]
+    seqlen = model.input_shape[1]
+    input_ids = _string_to_inputs(input_string, batchsize)
     result = [input_ids]
     for _ in range(numpredict):
+        pad = tf.ones([batchsize, seqlen], input_ids.dtype)
+        input_ids = tf.concat([pad, input_ids], axis=1)
+        input_ids = input_ids[:, -seqlen:]
         outputs = model.predict_on_batch(input_ids)
+        outputs = outputs[0]
         latest_logits = outputs[:, -1, :]
         prediction = sample_logits(latest_logits, temperature)
         prediction = tf.cast(prediction, input_ids.dtype)
-        input_ids = prediction
+        input_ids = tf.concat([input_ids, prediction], axis=1)
         result.append(prediction)
-    # Remove the GO byte and convert to strings
-    outstring = data_pipe.ids_to_python_string(tf.concat(result, axis=1)[:, 1:])
+    # Convert to strings
+    outstring = data_pipe.ids_to_python_string(tf.concat(result, axis=1))
     # Print the results for each sequence in the batch
     max_numlines = 8
     for line in outstring[:max_numlines]:
@@ -171,68 +212,15 @@ def run_inference(model, input_string, numpredict, temperature=1e-16):
         print('--------------------------------------------')
     return outstring
 
-def inspect_memory(model, input_string):
-    """
-    Plots the read and write weights used by DNC layers as they process their memory
-    model: a keras model compiled with the DNC states appended to its outputs.
-    input_string: the string to process
-    """
-    assert model.input_shape[0] == 1 # TODO support other batch sizes
-    # Find out how many DNC layers the model has
-    numlayers = len(model.output_shape[1][1:])//2 # FIXME this is a hard coded solution
-    reads = [[] for _ in range(numlayers)]
-    writes = [[] for _ in range(numlayers)]
-    # Convert string to integers.
-    input_string = bytes(chr(2) + input_string, 'utf-8')
-    input_ids = _string_to_inputs(input_string, model.input_shape[0])
-    # Pass each character in and collect the read/write weights
-    for idx in range(input_ids.shape[1]):
-        current_input = input_ids[:, idx:idx+1]
-        results = model.predict_on_batch(current_input)
-        # Manually extract the states and pack them into layers
-        readwrites = results[2:]
-        readwrites_by_layer = [(readwrites[i: i+2]) for i in range(0, len(readwrites), 2)]
-        for layernum, layer in enumerate(readwrites_by_layer):
-            reads[layernum].append(layer[0])
-            writes[layernum].append(layer[1])
-    # Plot the weights
-    layered_reads = np.stack([np.concatenate(layer, axis=0) for layer in reads])
-    layered_writes = np.stack([np.concatenate(layer, axis=0) for layer in writes])
-    maxseqlen = 256
-    ticks = range(len(input_string[:maxseqlen]))
-    ticklabels = [chr(c) for c in input_string[-maxseqlen:]]
-    for layernum, (reads, writes) in enumerate(zip(layered_reads, layered_writes)):
-        fig, axs = plt.subplots(nrows=2)
-        fig.suptitle('Layer {}'.format(layernum))
-        yticks = range(reads.shape[1])
-        axs[0].imshow(np.transpose(reads[-maxseqlen:]), cmap='gray', aspect='auto')
-        axs[0].set_yticks(yticks, minor=False)
-        axs[0].set_xticks(ticks, minor=False)
-        axs[0].set_xticklabels(ticklabels, minor=False)
-        axs[0].set_title('Read Weights')
-        axs[1].imshow(np.transpose(writes[-maxseqlen:]), cmap='gray', aspect='auto')
-        yticks = range(writes.shape[1])
-        axs[1].set_yticks(yticks, minor=False)
-        axs[1].set_xticks(ticks, minor=False)
-        axs[1].set_xticklabels(ticklabels, minor=False)
-        axs[1].set_title('Write Weights')
-        plt.show()
-
-
 if __name__ == '__main__':
     # Run inference
     config = json.load(open('./config.json'))
-    model = tf.keras.models.load_model('./model.h5', custom_objects={'DNCCell':DNCCell},
-        compile=True)
+    model = make_model(16, config['maxseqlen'], config['numlayers'], config['layersize'],
+            config['numheads'])
+    model.load_weights('./model.h5')
     numpredict = 512
     lines = ['This sentence is an example']
-    context = 'she'
+    context = ' '
     _ = run_inference(model, context, numpredict, 1e-16)
     lines = run_inference(model, context, numpredict, 0.5)
     _ = run_inference(model, context, numpredict, 0.75)
-    # Plot the attention weights
-    config = json.load(open('./config.json'))
-    model = make_model(1, config['numlayers'], config['layersize'], config['memsize'],
-            config['numheads'], return_state=True)
-    model.load_weights('./model.h5')
-    inspect_memory(model, lines[0])
