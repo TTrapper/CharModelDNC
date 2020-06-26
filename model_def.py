@@ -15,10 +15,13 @@ def make_model(batchsize, seqlen, numlayers, layersize, numheads):
     char_ids_2 = tf.keras.Input(shape=(seqlen), batch_size=batchsize)
     char_embeds_3 = tf.keras.layers.Embedding(numclasses, char_embed_size)(char_ids_2)
     # Convolution
+    """
     char_embeds_3 = tf.keras.layers.LayerNormalization()(char_embeds_3)
     char_embeds_3 = tf.keras.layers.Conv1D(filters=char_embed_size, kernel_size=3, strides=1,
             padding='same', data_format='channels_last', dilation_rate=1,
             activation=tf.nn.relu)(char_embeds_3)
+
+    """
     char_embeds_3 = tf.keras.layers.LayerNormalization()(char_embeds_3)
     # Attach some extra values to the inputs to act as a extra memory slots for the DNC
     num_extra_slots = 1
@@ -38,6 +41,7 @@ def make_model(batchsize, seqlen, numlayers, layersize, numheads):
     reconstruct = tf.reshape(reconstruct, [batchsize, num_in_slots, numheads * char_embed_size])
     reconstruct = reconstruct[:, num_extra_slots:, :] # Remove the extra memory slots
     reconstruct = tf.keras.layers.Dense(numheads * char_embed_size, tf.nn.relu)(reconstruct)
+    reconstruct = tf.keras.layers.Dropout(rate=0.1)(reconstruct)
     reconstruct = tf.reshape(reconstruct, [batchsize, seqlen, char_embed_size])
     reconstruct = tf.keras.layers.Dense(numclasses, None)(reconstruct)
     # Mask the logits that don't correspond to masked inputs
@@ -103,13 +107,12 @@ class DNCCell(tf.keras.layers.Layer):
         self.normlayer = tf.keras.layers.LayerNormalization()
         for layernum in range(self.depth):
             layer = {}
-            num_read_slots = self.memsize
-            layer['readlayer'] = tf.keras.layers.Dense(self.numheads * num_read_slots, None)
-            layer['writelayer'] = tf.keras.layers.Dense(self.numheads * self.memsize, None)
+            layer['readlayer'] = tf.keras.layers.Dense(self.numheads, None)
+            layer['writelayer'] = tf.keras.layers.Dense(self.numheads, None)
             layer['kernel'] = tf.keras.layers.Dense(self.units, tf.nn.relu)
-            layer['project'] = tf.keras.layers.Dense(self.units, tf.nn.relu)
+            layer['project'] = tf.keras.layers.Dense(self.units, None)
             self.layers.append(layer)
-        self.readout = tf.keras.layers.Dense(self.numheads * self.memsize, None)
+        self.readout = tf.keras.layers.Dense(self.numheads, None)
         self.built = True
 
     def call(self, inputs, states, training=False):
@@ -142,28 +145,30 @@ class DNCCell(tf.keras.layers.Layer):
         new_memval_2 = layer['project'](new_memval_2)
         new_memval_2 = self.normlayer(new_memval_2)
         # Write the new value to memory
-        write_weights_2 = layer['writelayer'](new_memval_2)
-        write_weights_4 = self._process_heads(write_weights_2, self.memsize)
-        new_memval_4 = tf.reshape(new_memval_2, [-1, 1, self.numheads, self.units//self.numheads])
+        keys = self._make_memory_keys(memory_4) + tf.expand_dims(new_memval_2, axis=1)
+        write_weights_4 = self._process_heads(layer['writelayer'](keys))
+        new_memval_4 = tf.reshape(new_memval_2, [-1, 1, self.numheads, self.headsize])
         memory_4 = ((1 - write_weights_4) * memory_4) + (write_weights_4 * new_memval_4)
         return new_memval_2, memory_4
 
+    def _make_memory_keys(self, memory_4):
+        """
+        Creates attention keys from memory slots by combining each slot with the mean of all slots
+        """
+        memory = tf.reshape(memory_4, [-1, self.memsize, self.units])
+        mean_memory = tf.reduce_mean(memory, axis=1, keepdims=True)
+        return memory + mean_memory
+
     def _read_memory(self, memory_4, readlayer):
-        # Get average over memory slots
-        memory_2 = tf.reshape(tf.reduce_mean(memory_4, axis=1), [-1, self.units])
-        # Compute read weights from the average mem values
-        read_weights_2 = readlayer(memory_2)
-        read_weights_4 = self._process_heads(read_weights_2, self.memsize)
-        # Apply read weights to each memory slot and reduce to a single value
-        memory_4 *= read_weights_4
-        attended_mem_3 = tf.reshape(memory_4, [-1, self.memsize, self.units])
+        keys = self._make_memory_keys(memory_4) # batch, memsize, numheads * headsize
+        weights = self._process_heads(readlayer(keys)) # batch, memsize, numheads, 1
+        attended_mem_3 = tf.reshape(weights * memory_4, [-1, self.memsize, self.units])
         return tf.reduce_sum(attended_mem_3, axis=1)
 
-    def _process_heads(self, weights_2, numitems):
+    def _process_heads(self, weights_3):
         """
-        Takes flattened read/write logits and seperately applies softmax to each read/write head
+        Takes read/write logits and seperately applies softmax to each read/write head
         """
-        weights_3 = tf.reshape(weights_2, [-1, numitems, self.numheads])
         weights_3 = tf.nn.softmax(weights_3, axis=1)
         return tf.expand_dims(weights_3, axis=3)
 
@@ -187,14 +192,14 @@ def run_inference(model, input_string, numpredict, temperature=1e-16):
     print('******************************************\n')
     temperature = tf.constant(temperature)
     # Convert string to integers. Prepend the start-of-text byte.
-    input_string = bytes(' ' + input_string, 'utf-8')
+    input_string = bytes( input_string, 'utf-8')
     batchsize = model.input_shape[0]
     seqlen = model.input_shape[1]
     input_ids = _string_to_inputs(input_string, batchsize)
     result = [input_ids]
+    pad = tf.ones([batchsize, seqlen], input_ids.dtype)
+    input_ids = tf.concat([pad, input_ids], axis=1)
     for _ in range(numpredict):
-        pad = tf.ones([batchsize, seqlen], input_ids.dtype)
-        input_ids = tf.concat([pad, input_ids], axis=1)
         input_ids = input_ids[:, -seqlen:]
         outputs = model.predict_on_batch(input_ids)
         outputs = outputs[0]
