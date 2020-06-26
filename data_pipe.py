@@ -21,7 +21,7 @@ def file_to_dataset(filepath, batchsize, maxseqlen, maskinputs=True):
     seqlen = maxseqlen
     example_generator = make_example_generator(filepath, 1 + seqlen)
     lines = tf.data.Dataset.from_generator(example_generator, tf.string, tf.TensorShape([]))
-    lines = lines.prefetch(128)
+    lines = lines.prefetch(32)
     lines = lines.map(lambda line: string_to_ids(line))
     lines = lines.map(lambda line: tf.reshape(line, [seqlen + 1])) # explicitly sets the shape
     lines = lines.batch(batchsize, drop_remainder=True)
@@ -31,7 +31,7 @@ def file_to_dataset(filepath, batchsize, maxseqlen, maskinputs=True):
         # Randomly mask some of the input values
         lines = lines.map(lambda x,y: (randomly_mask(x), y))
         lines = lines.map(lambda x,y: (randomly_sequence_mask(x), y))
-    lines = lines.prefetch(128)
+    lines = lines.prefetch(4)
     return lines
 
 def randomly_mask(tensor):
@@ -60,7 +60,7 @@ def string_to_ids(tf_string):
     # characters may get split into invalid utf-8 bytes if they lie on the boundary.
     result = tf.io.decode_raw(result, tf.uint8)
     result = tf.cast(result, tf.int32)
-    result = tf.squeeze(result)
+    result = tf.squeeze(result, axis=1)
     return result
 
 def ids_to_string(tensor):
