@@ -31,6 +31,7 @@ def make_model(batchsize, seqlen, numlayers, layersize, numheads):
     # DNC layers
     # TODO: no longer processed as a sequence, move layers out of an RNN cell
     char_embeds_3 = tf.reshape(char_embeds_3, [batchsize, 1, num_in_slots * layersize])
+    char_embeds_3 = tf.keras.layers.Dropout(rate=0.1)(char_embeds_3)
     cell = DNCCell(layersize, num_in_slots, numlayers, numheads)
     rnn = tf.keras.layers.RNN(cell, return_sequences=True, return_state=True, stateful=False)
     out = rnn(char_embeds_3)
@@ -45,7 +46,7 @@ def make_model(batchsize, seqlen, numlayers, layersize, numheads):
     reconstruct = tf.reshape(reconstruct, [batchsize, seqlen, char_embed_size])
     reconstruct = tf.keras.layers.Dense(numclasses, None)(reconstruct)
     # Mask the logits that don't correspond to masked inputs
-    mask = char_ids_2 == 0
+    mask = char_ids_2 != char_ids_2
     mask = tf.tile(tf.expand_dims(mask, axis=2), [1, 1, numclasses])
     reconstruct = tf.where(mask, reconstruct, tf.zeros_like(reconstruct))
     reconstruct = tf.keras.layers.Masking()(reconstruct)
@@ -127,6 +128,7 @@ class DNCCell(tf.keras.layers.Layer):
             if layernum == len(self.layers) // 2:
                 memory_4 = tf.transpose(memory_4, [0, 2, 1, 3]) # batch, heads, memsize, headsize
                 memory_4 = tf.reshape(memory_4, [-1, self.memsize, self.numheads, self.headsize])
+
             outputs, memory_4 = self._runlayer(memory_4, layer)
         out = self._read_memory(memory_4, readlayer=self.readout)
         memory_2 = tf.reshape(memory_4, [-1, self.memsize * self.units])
@@ -144,6 +146,7 @@ class DNCCell(tf.keras.layers.Layer):
         new_memval_2 = tf.keras.layers.Dropout(rate=0.1)(new_memval_2)
         new_memval_2 = layer['project'](new_memval_2)
         new_memval_2 = self.normlayer(new_memval_2)
+        new_memval_2 = tf.keras.layers.Dropout(rate=0.1)(new_memval_2)
         # Write the new value to memory
         keys = self._make_memory_keys(memory_4) + tf.expand_dims(new_memval_2, axis=1)
         write_weights_4 = self._process_heads(layer['writelayer'](keys))
@@ -229,3 +232,4 @@ if __name__ == '__main__':
     _ = run_inference(model, context, numpredict, 1e-16)
     lines = run_inference(model, context, numpredict, 0.5)
     _ = run_inference(model, context, numpredict, 0.75)
+    _ = run_inference(model, context, numpredict, 1.0)
