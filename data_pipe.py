@@ -17,8 +17,7 @@ def make_example_generator(filepath, seqlen):
                 yield seq
     return example_generator
 
-def file_to_dataset(filepath, batchsize, maxseqlen, maskinputs=True):
-    seqlen = maxseqlen
+def file_to_dataset(filepath, batchsize, seqlen, maskinputs=True):
     example_generator = make_example_generator(filepath, 1 + seqlen)
     lines = tf.data.Dataset.from_generator(example_generator, tf.string, tf.TensorShape([]))
     lines = lines.prefetch(32)
@@ -31,6 +30,9 @@ def file_to_dataset(filepath, batchsize, maxseqlen, maskinputs=True):
         # Randomly mask some of the input values
         lines = lines.map(lambda x,y: (randomly_mask(x), y))
         lines = lines.map(lambda x,y: (randomly_sequence_mask(x), y))
+        chars_per_span_mask = 32 # Apply a span mask for every N chars in the sequence
+        for _ in range(seqlen // chars_per_span_mask):
+            lines = lines.map(lambda x,y: (randomly_span_mask(x), y))
     lines = lines.prefetch(4)
     return lines
 
@@ -45,13 +47,35 @@ def randomly_sequence_mask(tensor):
     Mask the first N characters of the first P examples in the batch, where N is uniformly sampled
     from range(0, len(example)) for each example, and P is a constant where 0 <= P <= batchsize.
     """
-    percent_masked = 0.25 # proportion of batch elements that will have a mask applied
+    percent_masked = 0.1 # proportion of batch elements that will have a mask applied
     batchsize, maxlen = tensor.shape
     num_masked = tf.cast(percent_masked * tf.cast(batchsize, tf.float32), tf.int32)
     lengths = tf.random.uniform(shape=[num_masked], minval=0, maxval=maxlen, dtype=tf.int32)
     lengths = tf.concat([lengths, tf.zeros([batchsize - num_masked], dtype=lengths.dtype)], axis=0)
     mask = tf.sequence_mask(lengths, maxlen=maxlen)
     return tf.where(mask, tf.ones_like(tensor), tensor)
+
+def randomly_span_mask(tensor):
+    """ Mask a random span of contiguous characters within each example """
+    batchsize, maxlen = tensor.shape
+    mean_span_len = 8 # Tends to cover about a word or two
+    stdv_span_len = 2
+    def span_mask(vector): # computes and applies mask to a single row of the batch
+        span_len = tf.random.normal(shape=[], mean=mean_span_len, stddev=stdv_span_len)
+        span_len = tf.cast(span_len, tf.int32)
+        span_len = tf.math.maximum(0, span_len)
+        span_len = tf.math.minimum(maxlen, span_len)
+        mask = tf.zeros([span_len], dtype=vector.dtype)
+        span_start = tf.random.uniform(shape=[], minval=0, maxval=maxlen - span_len, dtype=tf.int32)
+        left_pad = tf.ones([span_start], dtype=vector.dtype)
+        right_pad = tf.ones([maxlen - (span_start + span_len)], dtype=vector.dtype)
+        mask = tf.concat([left_pad, mask, right_pad], axis=0)
+        return vector * mask
+    percent_masked = 1.0 # proportion of batch elements that will have a mask applied
+    num_masked = tf.cast(percent_masked * tf.cast(batchsize, tf.float32), tf.int32)
+    unmasked = tensor[:-num_masked]
+    masked = tf.map_fn(span_mask, tensor[-num_masked:])
+    return tf.concat([unmasked, masked], axis=0)
 
 
 def string_to_ids(tf_string):
@@ -76,8 +100,8 @@ def ids_to_python_string(tensor):
 
 if __name__ == '__main__':
     batchsize = 10
-    maxseqlen = 32
-    lines = file_to_dataset('./traindata.txt', batchsize, maxseqlen)
+    seqlen = 256
+    lines = file_to_dataset('./traindata.txt', batchsize, seqlen)
     print(lines)
     lines = iter(lines)
     for batch in range(5):
@@ -92,5 +116,3 @@ if __name__ == '__main__':
             print(reconstruct)
             print(y)
             print('---------------------------------------')
-        print('=======================================')
-
