@@ -1,5 +1,66 @@
-{"layersize": 1024,
- "numlayers": 12,
- "numheads":32,
- "batchsize":1024,
- "maxseqlen":256}
+{"batchsize":512,
+ "dropout":0.1,
+ "char_embed_size":32,
+ "train_char_embeds":false,
+ "blocks": [
+    {"numheads":1,
+     "memsize":8,
+     "writeheads":8,
+     "kernelsize":256,
+     "predict_ahead":0,
+     "numlayers":8,
+     "trainable":false},
+
+    {"numheads":8,
+     "memsize":4,
+     "writeheads":8,
+     "kernelsize":512,
+     "predict_ahead":8,
+     "numlayers":4,
+     "trainable":false},
+
+    {"compress":true,
+     "numheads":8,
+     "memsize":8,
+     "writeheads":16,
+     "kernelsize":1024,
+     "predict_ahead":8,
+     "numlayers":8,
+     "trainable":false},
+
+    {"numheads":8,
+     "memsize":8,
+     "writeheads":16,
+     "kernelsize":1024,
+     "predict_ahead":16,
+     "numlayers":8,
+     "trainable":false},
+
+    {"compress":true,
+     "numheads":16,
+     "memsize":8,
+     "writeheads":32,
+     "kernelsize":1024,
+     "predict_ahead":16,
+     "numlayers":8,
+     "trainable":true},
+
+    {"numheads":16,
+     "memsize":8,
+     "writeheads":32,
+     "kernelsize":1024,
+     "predict_ahead":16,
+     "numlayers":8,
+     "trainable":true}
+ ],
+ "blocks_to_be_added": [
+
+    {"numheads":32,
+     "memsize":8,
+     "writeheads":32,
+     "kernelsize":1024,
+     "predict_ahead":32,
+     "numlayers":8,
+     "trainable":true}
+ ]
+}

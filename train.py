@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 
 import numpy as np
@@ -7,6 +6,7 @@ import tensorflow as tf
 
 import data_pipe
 import model_def
+import process_config
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--restore', action='store_true')
@@ -20,27 +20,20 @@ def parseargs(parser):
 
 def setup(restore, data_fp, evalmode):
     learn_rate = 1e-4
-    config = json.load(open('./config.json'))
-    batchsize = config['batchsize']
-    maxseqlen = config['maxseqlen']
-    numlayers = config['numlayers']
-    layersize = config['layersize']
-    numheads = config['numheads']
-    model = model_def.make_model(batchsize, maxseqlen, numlayers, layersize, numheads)
-    maskinputs = not evalmode
-    dataset = data_pipe.file_to_dataset(data_fp, batchsize, maxseqlen, maskinputs)
+    config = process_config.load_config()
+    model = model_def.make_model(config)
+    dataset = data_pipe.file_to_dataset(data_fp, config, maskinputs=not evalmode)
     if restore:
-        model.load_weights('./model.h5')
+        model.load_weights('./model.h5', by_name=True, skip_mismatch=True)
     optimizer = tf.keras.optimizers.Adam(learn_rate)
     model.compile(optimizer=optimizer,
-        loss=[tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-              tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)])
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True))
     model.summary()
     return dataset, model
 
 def train(model, dataset):
     def inference_fn(batch, logs):
-        if batch % 7000 == 200:
+        if batch % 1000 == 200:
             model.save('./model.h5', save_format='h5', overwrite=True, include_optimizer=True)
             for softmax_temp in [1e-16, 0.5, 0.75]:
                 context = ' '
