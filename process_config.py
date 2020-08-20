@@ -23,7 +23,7 @@ def process_block(block_config, char_embed_size):
             'writeheads = {}'.format(block_config['subseqlen'], block_config['writeheads']))
     # When a block isn't being trained, don't do predict-ahead
     if not block_config['trainable'] and block_config['predict_ahead'] > 0:
-        block_config['predict_ahead'] = 1
+        block_config['predict_ahead'] = 0
     if 'compress' not in block_config:
         block_config['compress'] = False
 
