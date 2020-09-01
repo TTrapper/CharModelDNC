@@ -5,12 +5,12 @@ import process_config
 import numpy as np
 import tensorflow as tf
 import data_pipe
-
+import random
 
 def make_model(config):
     inputs_collector = []
     outputs_collector = []
-    predict_ahead_layers = make_predict_ahead_layers(config['numclasses'])
+    predict_ahead_layers = make_predict_ahead_layers(config['numclasses'], 0.02)
     char_embed_layer = tf.keras.layers.Embedding(config['numclasses'], config['char_embed_size'],
             trainable=config['train_char_embeds'])
     char_embeds = embed_characters(char_embed_layer, config, inputs_collector)
@@ -21,16 +21,16 @@ def make_model(config):
         build_predict_ahead(char_embeds, block_config['predict_ahead'], config['batchsize'],
                 char_embed_layer, predict_ahead_layers, block_config['trainable'],
                 config['dropout'], namescope, inputs_collector, outputs_collector)
-    context_size = 1024
     context = char_embeds
     next_char = tf.keras.layers.Dense(config['numclasses'], None, name='out_logits')(context)
     outputs_collector.append(next_char)
     model = tf.keras.Model(inputs=tuple(inputs_collector), outputs=tuple(outputs_collector))
     return model
 
-def make_predict_ahead_layers(numclasses):
+def make_predict_ahead_layers(numclasses, dropout):
     predict_ahead_layers = []
-    predict_ahead_layers.append(tf.keras.layers.GRU(512, return_sequences=True, unroll=False))
+    predict_ahead_layers.append(tf.keras.layers.GRU(512, return_sequences=True, unroll=False,
+        recurrent_dropout=dropout, dropout=dropout))
     predict_ahead_layers.append(tf.keras.layers.Dense(numclasses, None))
     return predict_ahead_layers
 
@@ -92,12 +92,15 @@ def build_predict_ahead(context, num_ahead, batchsize, char_embed_layer, predict
         trainable, dropout, namescope, inputs_collector, outputs_collector):
     if num_ahead == 0:
         return
+    if len(predict_ahead_layers) == 0:
+        raise ValueError('build_predict_ahead was called with empty list: predict_ahead_layers')
     context = linear_project(context, 1024, trainable, dropout, namescope + '_context_ahead')
-    context = create_predict_ahead_inputs(context, num_ahead, batchsize, char_embed_layer,
+    ahead = create_predict_ahead_inputs(context, num_ahead, batchsize, char_embed_layer,
             inputs_collector)
     for layer in predict_ahead_layers:
-         context = layer(context)
-    outputs_collector.append(context)
+         ahead = layer(ahead)
+    outputs_collector.append(ahead)
+    return context
 
 def linear_project(values, size, trainable, dropout, namescope):
     values = tf.keras.layers.Dense(size, None, trainable=trainable,
@@ -290,11 +293,11 @@ def run_inference(model, config, input_string, numpredict, temperature=1e-16):
     seqlen = model.input_shape[0][1]
     input_ids = _string_to_inputs(input_string, batchsize)
     result = [input_ids]
-    ahead = 16
-    pad = tf.ones([batchsize, seqlen + ahead], input_ids.dtype)
-    input_ids = tf.concat([pad, input_ids], axis=1)[:, -(seqlen + ahead):]
     # FIXME not actually used should build a version of the model that doesn't have these
     subseqlens, n_ahead_for_each_subseq = data_pipe.collect_subsequences_to_num_ahead(config)
+    ahead = max(n_ahead_for_each_subseq)
+    pad = tf.ones([batchsize, seqlen + ahead], input_ids.dtype)
+    input_ids = tf.concat([pad, input_ids], axis=1)[:, -(seqlen + ahead):]
     future = data_pipe.select_targets(input_ids, config['seqlen'], subseqlens,
             n_ahead_for_each_subseq)
     future = tuple([data_pipe.add_go_byte(x) for x in future])
@@ -316,19 +319,17 @@ def run_inference(model, config, input_string, numpredict, temperature=1e-16):
         print('--------------------------------------------')
     return outstring
 
+
 if __name__ == '__main__':
     # Run inference
     config = process_config.load_config()
     config['batchsize'] = 4
     model = make_model(config)
     model.load_weights('./model.h5', by_name=True, skip_mismatch=True)
-#    model.load_weights('./model.h5', by_name=False)
-#    model.save('./model.h5', save_format='h5', overwrite=True, include_optimizer=True)
     model.summary()
-
     numpredict = 512
     lines = ['This sentence is an example']
-    context = ' '
+    context = '. '
     _ = run_inference(model, config, context, numpredict, 1e-16)
     lines = run_inference(model, config, context, numpredict, 0.5)
     _ = run_inference(model, config, context, numpredict, 0.75)
