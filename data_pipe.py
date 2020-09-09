@@ -47,14 +47,13 @@ def file_to_dataset(filepath, config, maskinputs=True):
             n_ahead_for_each_subseq)))
     if maskinputs:
         # Randomly mask some of the input values
-#        lines = lines.map(lambda x,y: (randomly_mask(x), y))
+        lines = lines.map(lambda x,y: (randomly_mask_sampled_maskprob(x, 0.2), y))
         lines = lines.map(lambda x,y: (randomly_sequence_mask(x), y))
         chars_per_span_mask = 64 # Apply a span mask for every N chars in the sequence
 #        for _ in range(seqlen // chars_per_span_mask):
 #            lines = lines.map(lambda x,y: (randomly_span_mask(x), y))
     lines = lines.map(lambda x,y: ((x, normalize(x)), normalize_targets(y)))
-    lines = lines.map(lambda x,y: (x + tuple([add_go_byte(y_) for y_ in y[:-1]]), y))
-
+    lines = lines.map(lambda x,y: (x + tuple([randomly_mask(y_, 0.5) for y_ in y[:-1]]), y))
     lines = lines.prefetch(4)
     return lines
 
@@ -148,9 +147,15 @@ def mask_first_char(tensor):
     go = tf.zeros([batchsize, 1], tensor.dtype)
     return tf.concat([go, tensor[:, 1:]], axis=1)
 
-def randomly_mask(tensor):
-    max_maskprob = 0.10
+def randomly_mask_sampled_maskprob(tensor, max_maskprob):
+    """
+    Randomly mask values in the tensor, where the masking rate is uniformly sampled from:
+        [0, max_maskprob]
+    """
     maskprob = tf.random.uniform([], minval=0, maxval=max_maskprob, dtype=tf.dtypes.float32)
+    return randomly_mask(tensor, maskprob)
+
+def randomly_mask(tensor, maskprob):
     mask = tf.random.uniform(tensor.shape, minval=0, maxval=1, dtype=tf.dtypes.float32)
     mask = tf.where(tf.less(mask, maskprob), tf.zeros_like(mask), tf.ones_like(mask))
     return tensor * tf.cast(mask, tensor.dtype)

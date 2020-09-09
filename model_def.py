@@ -10,18 +10,48 @@ import random
 def make_model(config):
     inputs_collector = []
     outputs_collector = []
-    predict_ahead_layers = make_predict_ahead_layers(config['numclasses'], 0.02)
+
     char_embed_layer = tf.keras.layers.Embedding(config['numclasses'], config['char_embed_size'],
             trainable=config['train_char_embeds'])
     char_embeds = embed_characters(char_embed_layer, config, inputs_collector)
+    # Define layers that encode input sequence
+    blocks = []
     for blocknum, block_config in enumerate(config['blocks']):
         namescope = 'block_{}'.format(blocknum)
-        char_embeds = build_block(char_embeds, block_config, config, inputs_collector,
-                outputs_collector, namescope)
-        build_predict_ahead(char_embeds, block_config['predict_ahead'], config['batchsize'],
-                char_embed_layer, predict_ahead_layers, block_config['trainable'],
-                config['dropout'], namescope, inputs_collector, outputs_collector)
-    context = char_embeds
+        blocks.append(make_block_layers(block_config, config, namescope))
+    # Define predict ahead layers that attempt to decode into the future
+    predict_ahead_blocks = []
+    num_ahead_blocks = len(config['predict_ahead_blocks'])
+    for blocknum, block_config in enumerate(config['predict_ahead_blocks']):
+        # ahead blocks are named in decreasing order to allow adding a new block to the bottom
+        # of the compute stack and still be able to restore deeper layers by name
+        namescope = 'ahead_block_{}'.format(num_ahead_blocks - blocknum)
+        predict_ahead_blocks.append(make_block_layers(block_config, config, namescope))
+    # Apply layers
+    for block, block_config in zip(blocks, config['blocks']):
+        for layer in block:
+            char_embeds = layer(char_embeds)
+        context = char_embeds
+        if block_config['predict_ahead']:
+            predict_ahead, ahead_ids = create_predict_ahead_inputs(context,
+                    block_config['predict_ahead'], config['batchsize'], char_embed_layer,
+                    inputs_collector)
+            for block in predict_ahead_blocks:
+                for layer in block: # FIXME need to decide if a block can be used
+                    predict_ahead = layer(predict_ahead)
+            predict_ahead = tf.reshape(predict_ahead, [-1, config['char_embed_size']])
+            predict_ahead = tf.keras.layers.Dense(config['numclasses'], None,
+                    name='predict_ahead')(predict_ahead)
+            # mask logits for known inputs (predict-ahead reconstucts missing input chars)
+            # using custom functions because TF ones were causing a bug during model save
+            zeros_like = lambda x: tf.zeros(tf.shape(x), x.dtype)
+            ones_like = lambda x: tf.ones(tf.shape(x), x.dtype)
+            mask = tf.where(ahead_ids == 0, ones_like(ahead_ids), zeros_like(ahead_ids))
+            mask = tf.reshape(mask, [-1, 1])
+            predict_ahead *= tf.cast(mask, predict_ahead.dtype)
+            predict_ahead = tf.keras.layers.Masking()(predict_ahead)
+            outputs_collector.append(predict_ahead)
+
     next_char = tf.keras.layers.Dense(config['numclasses'], None, name='out_logits')(context)
     outputs_collector.append(next_char)
     model = tf.keras.Model(inputs=tuple(inputs_collector), outputs=tuple(outputs_collector))
@@ -50,30 +80,29 @@ def embed_characters(char_embed_layer, config, inputs_collector):
     char_embeds = tf.keras.layers.Dropout(rate=config['dropout'])(char_embeds)
     return char_embeds # batch, seqlen, embedsize
 
-def build_block(char_embeds, block_config, config, inputs_collector, outputs_collector, namescope):
-    char_embed_size = config['char_embed_size']
-    char_embeds = tf.reshape(char_embeds, [-1, block_config['numheads'], block_config['memsize'],
-        char_embed_size])
-    char_embeds = tf.reshape(char_embeds,
-            [-1, 1, block_config['memsize'] * block_config['wordsize']])
+def make_block_layers(block_config, config, namescope):
+    layers = []
+    layers.append(lambda char_embeds: tf.reshape(char_embeds,
+            [-1, 1, block_config['memsize'] * block_config['wordsize']],
+            name=namescope + '_reshape_in'))
     cell = DNCCell(block_config['wordsize'], block_config['memsize'], block_config['numlayers'],
             block_config['numheads'], kernel_size=block_config['kernelsize'],
             fixed_write_slots=block_config['writeheads'] // block_config['numheads'],
             num_position_embeds=128, dropout=config['dropout'])
-    rnn = tf.keras.layers.RNN(cell, return_sequences=False, return_state=True, stateful=False,
-            trainable=block_config['trainable'], name=namescope + '_rnn')
-    char_embeds = rnn(char_embeds)[1]
-    context_size = (block_config['subseqlen'] * char_embed_size)
+    layers.append(tf.keras.layers.RNN(cell, return_sequences=False, return_state=True,
+        stateful=False, trainable=block_config['trainable'], name=namescope + '_rnn'))
+    layers.append(lambda rnn_out: rnn_out[1])
+    context_size = block_config['subseqlen'] * config['char_embed_size']
     if block_config['compress']:
         window_size = config['char_embed_size'] * block_config['writeheads']
-        if window_size * 2 <= context_size:
-            window_size *= 2
-        char_embeds = tf.reshape(char_embeds, [-1, window_size])
-        char_embeds = linear_project(char_embeds, window_size // 2, block_config['trainable'],
-                config['dropout'], namescope + '_compress')
+        layers.append(tf.keras.layers.Reshape([-1, window_size],
+                name=namescope + '_compress_reshape'))
+        layers.extend(linear_project_layers(window_size // 2, block_config['trainable'],
+                config['dropout'], namescope + '_compress'))
         context_size = context_size // 2
-    char_embeds = tf.reshape(char_embeds, [-1, context_size])
-    return char_embeds
+    layers.append(lambda char_embeds: tf.reshape(char_embeds, [-1, context_size],
+            name=namescope + '_reshape_in'))
+    return layers
 
 def create_predict_ahead_inputs(context, ahead, batchsize, embedlayer, inputs_collector):
     # Define inputs and embed chars
@@ -82,25 +111,11 @@ def create_predict_ahead_inputs(context, ahead, batchsize, embedlayer, inputs_co
     char_embeds = embedlayer(char_ids) # batchsize, subseq-batchsize, ahead, embedsize
     char_embed_size = char_embeds.shape[-1]
     char_embeds = tf.reshape(char_embeds, [-1, ahead, char_embed_size])
-    # Attach context vector to each char embed
-    context = tf.expand_dims(context, axis=1) # batch, 1, context_size
-    context = tf.tile(context, [1, ahead, 1])
-    context = tf.concat([context, char_embeds], axis=2)
-    return context
+    # Context gets added (assumes they are the same shape)
+    context = tf.reshape(context, tf.shape(char_embeds))
+    char_embeds += context
+    return char_embeds, char_ids
 
-def build_predict_ahead(context, num_ahead, batchsize, char_embed_layer, predict_ahead_layers,
-        trainable, dropout, namescope, inputs_collector, outputs_collector):
-    if num_ahead == 0:
-        return
-    if len(predict_ahead_layers) == 0:
-        raise ValueError('build_predict_ahead was called with empty list: predict_ahead_layers')
-    context = linear_project(context, 1024, trainable, dropout, namescope + '_context_ahead')
-    ahead = create_predict_ahead_inputs(context, num_ahead, batchsize, char_embed_layer,
-            inputs_collector)
-    for layer in predict_ahead_layers:
-         ahead = layer(ahead)
-    outputs_collector.append(ahead)
-    return context
 
 def linear_project(values, size, trainable, dropout, namescope):
     values = tf.keras.layers.Dense(size, None, trainable=trainable,
@@ -109,6 +124,10 @@ def linear_project(values, size, trainable, dropout, namescope):
             name=namescope + '_layernorm')(values)
     return tf.keras.layers.Dropout(rate=dropout)(values)
 
+def linear_project_layers(size, trainable, dropout, namescope):
+    return [tf.keras.layers.Dense(size, None, trainable=trainable, name=namescope + '_dense'),
+            tf.keras.layers.LayerNormalization(trainable=trainable,name=namescope + '_layernorm'),
+            tf.keras.layers.Dropout(rate=dropout)]
 
 class DNCCell(tf.keras.layers.Layer):
     """
@@ -246,7 +265,7 @@ class DNCCell(tf.keras.layers.Layer):
         return self._attach_pos(memory)
 
     def _attach_pos(self, tensor_3D):
-        batchsize, num_items, itemsize = tensor_3D.shape
+        batchsize, num_items, itemsize = tf.unstack(tf.shape(tensor_3D))
         # position embeds taken from the end of the range so that if memsize is increased, the value
         # to the right of memory (which is the value at the end of a sequence), keeps the same pos.
         pos = self.pos(tf.range(self.num_position_embeds - num_items, self.num_position_embeds))

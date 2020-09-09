@@ -6,6 +6,8 @@ def load_config():
     config['numclasses'] = 256 # assume utf-8 bytes
     for block_config in config['blocks']:
         process_block(block_config, config['char_embed_size'])
+    for block_config in config['predict_ahead_blocks']:
+        process_block(block_config, config['char_embed_size'])
     compute_total_seqlen(config)
     print_config(config)
     return config
@@ -24,6 +26,9 @@ def process_block(block_config, char_embed_size):
     # When a block isn't being trained, don't do predict-ahead
     if not block_config['trainable'] and block_config['predict_ahead'] > 0:
         block_config['predict_ahead'] = 0
+    # If predict_ahead is enabled, the number of steps to predict is equal to the block's subseqlen
+    elif block_config['predict_ahead']:
+        block_config['predict_ahead'] = block_config['subseqlen']
     if 'compress' not in block_config:
         block_config['compress'] = False
 
