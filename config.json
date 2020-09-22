@@ -1,97 +1,55 @@
-{"batchsize":1024,
- "dropout":0.01,
+{"batchsize":128,
+ "dropout":0.001,
  "char_embed_size":32,
  "train_char_embeds":true,
-
- "predict_ahead_blocks" : [
-
-    {"numheads":8,
-     "memsize":8,
-     "writeheads":16,
-     "kernelsize":1024,
-     "predict_ahead":false,
-     "numlayers":8,
-     "trainable":true},
-
-    {"numheads":8,
-     "memsize":4,
-     "writeheads":8,
-     "kernelsize":512,
-     "predict_ahead":false,
-     "numlayers":8,
-     "trainable":true},
-
-    {"numheads":1,
-     "memsize":8,
-     "writeheads":8,
-     "kernelsize":256,
-     "predict_ahead":false,
-     "numlayers":8,
-     "trainable":true}
-
- ],
-
  "blocks": [
-    {"numheads":1,
+    {"compress":true,
+     "numheads":4,
      "memsize":8,
-     "writeheads":8,
-     "kernelsize":256,
-     "predict_ahead":false,
-     "numlayers":8,
-     "trainable":true},
-
-    {"numheads":8,
-     "memsize":4,
-     "writeheads":8,
      "kernelsize":512,
-     "predict_ahead":false,
      "numlayers":8,
      "trainable":true},
 
     {"compress":true,
      "numheads":8,
      "memsize":8,
-     "writeheads":16,
-     "kernelsize":1024,
-     "predict_ahead":false,
+     "kernelsize":512,
      "numlayers":8,
      "trainable":true},
-
-    {"numheads":8,
-     "memsize":8,
-     "writeheads":16,
-     "kernelsize":1024,
-     "predict_ahead":true,
-     "numlayers":8,
-     "trainable":true}
-
- ],
- "blocks_to_be_added": [
-
 
     {"compress":true,
-     "numheads":16,
+     "numheads":8,
      "memsize":8,
-     "writeheads":32,
      "kernelsize":1024,
-     "predict_ahead":false,
      "numlayers":8,
      "trainable":true},
+    
+     {"compress":true,
+      "numheads":8,
+      "memsize":8,
+      "kernelsize":1024,
+      "numlayers":8,
+      "trainable":true},
 
-    {"numheads":16,
-     "memsize":8,
-     "writeheads":32,
-     "kernelsize":1024,
-     "predict_ahead":128,
-     "numlayers":8,
-     "trainable":true},
+     {"compress":true,
+      "numheads":16,
+      "memsize":8,
+      "kernelsize":2048,
+      "numlayers":8,
+      "trainable":true},
 
-    {"numheads":32,
-     "memsize":8,
-     "writeheads":32,
-     "kernelsize":2048,
-     "predict_ahead":32,
-     "numlayers":8,
-     "trainable":true}
+     {"compress":true,
+      "numheads":16,
+      "memsize":8,
+      "kernelsize":2048,
+      "numlayers":8,
+      "trainable":true},
+
+     {"compress":true,
+      "numheads":32,
+      "memsize":8,
+      "kernelsize":2048,
+      "numlayers":8,
+      "trainable":true}
  ]
 }

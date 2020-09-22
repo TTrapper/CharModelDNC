@@ -19,83 +19,26 @@ def make_example_generator(filepath, seqlen):
                 yield seq
     return example_generator
 
-def collect_subsequences_to_num_ahead(config):
-    """
-    Each of the model's blocks computes over a sub-sequence window of lenght L and may emit logits
-    to predict N chars into the future. Here we collect these values from the config.
-    """
-    n_ahead_for_each_subseq = []
-    subseqlens = []
-    for block_config in config['blocks']:
-        if block_config['predict_ahead'] > 0:
-            n_ahead_for_each_subseq.append(block_config['predict_ahead'])
-            subseqlens.append(block_config['subseqlen_compressed'])
-    return subseqlens, n_ahead_for_each_subseq
-
 def file_to_dataset(filepath, config, maskinputs=True):
     batchsize = config['batchsize']
     seqlen = config['seqlen']
-    subseqlens, n_ahead_for_each_subseq = collect_subsequences_to_num_ahead(config)
-    max_ahead = max(n_ahead_for_each_subseq)
-    example_generator = make_example_generator(filepath, max_ahead + seqlen)
+    example_generator = make_example_generator(filepath, 1 + seqlen)
     lines = tf.data.Dataset.from_generator(example_generator, tf.string, tf.TensorShape([]))
     lines = lines.prefetch(batchsize)
     lines = lines.map(lambda line: string_to_ids(line))
-    lines = lines.map(lambda line: tf.reshape(line, [seqlen + max_ahead])) # explicitly sets shape
+    lines = lines.map(lambda line: tf.reshape(line, [seqlen + 1])) # explicitly sets shape
     lines = lines.batch(batchsize, drop_remainder=True)
-    lines = lines.map(lambda line: (line[:, :-max_ahead], select_targets(line, seqlen, subseqlens,
-            n_ahead_for_each_subseq)))
+    lines = lines.map(lambda line: (line[:, :-1], line[:, -1:]))
     if maskinputs:
         # Randomly mask some of the input values
-        lines = lines.map(lambda x,y: (randomly_mask_sampled_maskprob(x, 0.2), y))
+        lines = lines.map(lambda x,y: (randomly_mask_sampled_maskprob(x, 0.3), y))
         lines = lines.map(lambda x,y: (randomly_sequence_mask(x), y))
         chars_per_span_mask = 64 # Apply a span mask for every N chars in the sequence
 #        for _ in range(seqlen // chars_per_span_mask):
 #            lines = lines.map(lambda x,y: (randomly_span_mask(x), y))
-    lines = lines.map(lambda x,y: ((x, normalize(x)), normalize_targets(y)))
-    lines = lines.map(lambda x,y: (x + tuple([randomly_mask(y_, 0.5) for y_ in y[:-1]]), y))
+    lines = lines.map(lambda x,y: ((x, normalize(x)), y))
     lines = lines.prefetch(4)
     return lines
-
-def select_targets(char_ids, full_seqlen, subseqlens, n_ahead_for_each_subseq):
-    """
-    Conceptually, the full sequence is divided into groupings of subsequences. Each grouping has
-    a constant subseqlen and number of future targets. This allows the model to have hierarchically
-    organzed targets at various subsequence sizes.
-
-    Example (ignoring batch dim):
-    char_ids: [a b c d e f g h i j k l m n o]
-    full_seqlen: 12
-    subseqlens: [3, 6, 12]
-    n_ahead_for_each_subseq: [1, 2, 3]
-
-    results in:
-
-    subseq: targets
-    [a b c]: [d]
-    [d e f]: [g]
-    [g h i]: [k]
-    [j k l]: [m]
-
-    [a b c d e f]: [g h]
-    [g h i j k l]: [m n]
-
-    [a b c d e f g h i j k l]: [m n o]
-
-    and returns the targets in a tuple where each entry, i, represents the targets for a given
-    subseq, and has shape [batch, subseqlens[i], n_ahead_for_each_subseq[i]]:
-
-    ( [[d] [g] [k] [n]]],
-      [[g h] [m n]],
-      [[m n o]] )
-
-    """
-    targets = []
-    for seqlen, ahead in zip(subseqlens, n_ahead_for_each_subseq):
-        target_indices = range(seqlen, full_seqlen + seqlen, seqlen)
-        target_indices = [list(range(x, x + ahead)) for x in target_indices]
-        targets.append(tf.gather(char_ids, indices=target_indices, axis=1))
-    return tuple(targets)
 
 def normalize(char_ids):
     """
@@ -227,14 +170,13 @@ if __name__ == '__main__':
         example = next(lines)
         inputs, targets = example
         inputs = [ids_to_python_string(x) for x in inputs]
-        targets = [ids_to_python_string(y) for y in targets]
+        targets = ids_to_python_string(targets)
         for idx in range(config['batchsize']):
             for x in inputs:
                 print(x[idx].replace(chr(0), '_'))
                 print()
-            for y in targets:
-                print(y[idx])
-                print()
+            print(targets[idx])
+            print()
 
             print('---------------------------------------')
 
