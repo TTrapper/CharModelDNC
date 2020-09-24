@@ -22,13 +22,13 @@ def make_example_generator(filepath, seqlen):
 def file_to_dataset(filepath, config, maskinputs=True):
     batchsize = config['batchsize']
     seqlen = config['seqlen']
-    example_generator = make_example_generator(filepath, 1 + seqlen)
+    example_generator = make_example_generator(filepath, 2 + seqlen)
     lines = tf.data.Dataset.from_generator(example_generator, tf.string, tf.TensorShape([]))
     lines = lines.prefetch(batchsize)
     lines = lines.map(lambda line: string_to_ids(line))
-    lines = lines.map(lambda line: tf.reshape(line, [seqlen + 1])) # explicitly sets shape
+    lines = lines.map(lambda line: tf.reshape(line, [seqlen + 2])) # explicitly sets shape
     lines = lines.batch(batchsize, drop_remainder=True)
-    lines = lines.map(lambda line: (line[:, :-1], line[:, -1:]))
+    lines = lines.map(lambda line: (line[:, 1:-1], collect_targets(line, config)))
     if maskinputs:
         # Randomly mask some of the input values
         lines = lines.map(lambda x,y: (randomly_mask_sampled_maskprob(x, 0.3), y))
@@ -40,6 +40,23 @@ def file_to_dataset(filepath, config, maskinputs=True):
     lines = lines.prefetch(4)
     return lines
 
+def collect_targets(line, config):
+    """
+    Each compute block has a fixed context window and emits logits to predict one char into the
+    past, and one into the future. The targets for these logits are extracted from the sequence,
+    taking into account the context window for the given block.
+    """
+    targets = []
+    context_window = config['seqlen']
+    for block in config['blocks']:
+        subseqlen = block['subseqlen_compressed']
+        backward_indices = list(range(0, context_window, subseqlen))
+        forward_indices = list(range(1 + subseqlen, 2 + context_window, subseqlen))
+        backward_targets = tf.gather(line, backward_indices, axis=1)
+        forward_targets = tf.gather(line, forward_indices, axis=1)
+        targets.append((backward_targets, forward_targets))
+    targets = tuple(targets)
+    return targets
 def normalize(char_ids):
     """
     Maps chars in the ASCII range:
@@ -170,13 +187,18 @@ if __name__ == '__main__':
         example = next(lines)
         inputs, targets = example
         inputs = [ids_to_python_string(x) for x in inputs]
-        targets = ids_to_python_string(targets)
+        print(targets)
+        targets = [(ids_to_python_string(backward), ids_to_python_string(forward)) for backward, forward in targets]
+        print(targets)
+
         for idx in range(config['batchsize']):
             for x in inputs:
                 print(x[idx].replace(chr(0), '_'))
                 print()
-            print(targets[idx])
-            print()
+            for backward_y, forward_y in targets:
+                print('Backward: ', backward_y[idx])
+                print('Forward:', forward_y[idx])
+                print()
 
             print('---------------------------------------')
 

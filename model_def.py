@@ -100,26 +100,32 @@ def make_model(config):
     previous_slotsize = char_embeds.shape[-1]
     for blocknum, block_config in enumerate(config['blocks']):
         namescope = 'block_{}'.format(blocknum)
-        if previous_slotsize != block_config['wordsize']:
+        trainable = block_config['trainable']
+        slotsize = block_config['wordsize']
+        if previous_slotsize != slotsize:
             char_embeds = tf.reshape(char_embeds, [-1, block_config['memsize'], previous_slotsize])
-            char_embeds = linear_project(char_embeds, block_config['wordsize'],
-                    block_config['trainable'], config['dropout'], namescope + '_in_projection')
+            char_embeds = linear_project(char_embeds, slotsize, trainable,
+                    config['dropout'], namescope + '_in_projection')
         char_embeds = tf.reshape(char_embeds, [-1, block_config['memsize'],
             block_config['numheads'], config['char_embed_size']])
         for layernum, layer in enumerate(range(block_config['numlayers'])):
             layerscope = '_layer_{}'.format(layernum)
             char_embeds = read_and_write(char_embeds, char_embed_layer, block_config['kernelsize'],
-                block_config['trainable'], config['dropout'], namescope + layerscope)
+                trainable, config['dropout'], namescope + layerscope)
         if block_config['compress']:
-            char_embeds = compress(char_embeds, block_config['trainable'], config['dropout'],
+            char_embeds = compress(char_embeds, trainable, config['dropout'],
                     namescope)
-        previous_slotsize = block_config['wordsize']
-    batchsize, nslots, nheads, headsize = char_embeds.shape
-    assert batchsize == config['batchsize']
-    context = tf.reshape(char_embeds, [batchsize, nslots * nheads * headsize])
-    next_char = tf.keras.layers.Dense(config['numclasses'], None, name='out_logits',
-            trainable=True)(context)
-    outputs_collector.append(next_char)
+        previous_slotsize = slotsize
+        # Logits from this block
+        batchsize, nslots, nheads, headsize = char_embeds.shape
+        subseqlen = block_config['subseqlen_compressed']
+        assert batchsize == config['batchsize'] * config['seqlen'] // subseqlen
+        context = tf.reshape(char_embeds, [batchsize, nslots * nheads * headsize])
+        prev_char = tf.keras.layers.Dense(config['numclasses'], None,
+                name='{}b{}'.format(blocknum, subseqlen), trainable=trainable)(context)
+        next_char = tf.keras.layers.Dense(config['numclasses'], None,
+                name='{}f{}'.format(blocknum, subseqlen), trainable=trainable)(context)
+        outputs_collector.append((prev_char, next_char))
     model = tf.keras.Model(inputs=tuple(inputs_collector), outputs=tuple(outputs_collector))
     return model
 
@@ -176,7 +182,7 @@ def run_inference(model, config, input_string, numpredict, temperature=1e-16):
     for _ in range(numpredict):
         input_ids = input_ids[:, -seqlen:]
         outputs = model.predict_on_batch((input_ids, data_pipe.normalize(input_ids)))
-        first_logits = outputs[-1][:, :]
+        first_logits = outputs[-1][-1][:, :]
         prediction = sample_logits(first_logits, temperature)
         prediction = tf.cast(prediction, input_ids.dtype)
         input_ids = tf.concat([input_ids, prediction], axis=1)
