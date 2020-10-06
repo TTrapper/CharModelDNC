@@ -7,28 +7,29 @@ import random
 import tensorflow as tf
 
 
-
-def make_example_generator(filepath, seqlen):
+def make_example_generator(filepath, seqlen, batchsize, shuffle):
     total_bytes = os.path.getsize(filepath)
-    num_examples = total_bytes
+    num_batches = total_bytes // batchsize
     def example_generator():
-        for i in range(num_examples):
-            start = random.randint(0, total_bytes - seqlen)
+        starts = range(-batchsize, 0)
+        for i in range(num_batches):
             with open(filepath, 'rb') as f:
-                f.seek(start)
-                seq = f.read(seqlen)
-                yield seq
+                starts = tf.random.uniform([batchsize], minval=0, maxval=total_bytes - seqlen,
+                        dtype=tf.dtypes.int32) if shuffle else [s + batchsize for s in starts]
+                sequences = []
+                for start in starts:
+                    f.seek(start)
+                    sequences.append(f.read(seqlen))
+                yield sequences
     return example_generator
 
 def file_to_dataset(filepath, config, maskinputs=True):
     batchsize = config['batchsize']
     seqlen = config['seqlen']
-    example_generator = make_example_generator(filepath, 2 + seqlen)
-    lines = tf.data.Dataset.from_generator(example_generator, tf.string, tf.TensorShape([]))
-    lines = lines.prefetch(batchsize)
-    lines = lines.map(lambda line: string_to_ids(line))
-    lines = lines.map(lambda line: tf.reshape(line, [seqlen + 2])) # explicitly sets shape
-    lines = lines.batch(batchsize, drop_remainder=True)
+    example_generator = make_example_generator(filepath, 2 + seqlen, batchsize, maskinputs)
+    lines = tf.data.Dataset.from_generator(example_generator, tf.string, tf.TensorShape([batchsize]))
+    lines = lines.map(lambda line: tf.stack([string_to_ids(l) for l in tf.unstack(line)], axis=0))
+    lines = lines.map(lambda line: tf.reshape(line, [batchsize, seqlen + 2])) # explicitly set shape
     lines = lines.map(lambda line: (line[:, 1:-1], collect_targets(line, config)))
     if maskinputs:
         # Randomly mask some of the input values
@@ -157,7 +158,6 @@ def randomly_span_mask(tensor):
     unmasked = tensor[:-num_masked]
     masked = tf.map_fn(span_mask, tensor[-num_masked:])
     return tf.concat([unmasked, masked], axis=0)
-
 
 def string_to_ids(tf_string):
     result = tf.strings.bytes_split(tf_string, 'UTF-8')
