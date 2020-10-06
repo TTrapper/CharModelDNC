@@ -7,6 +7,7 @@ import random
 import tensorflow as tf
 
 
+
 def make_example_generator(filepath, seqlen):
     total_bytes = os.path.getsize(filepath)
     num_examples = total_bytes
@@ -109,13 +110,15 @@ def mask_first_char(tensor):
 
 def randomly_mask_sampled_maskprob(tensor, max_maskprob):
     """
-    Randomly mask values in the tensor, where the masking rate is uniformly sampled from:
-        [0, max_maskprob]
+    Randomly mask values in the tensor, where the masking rate is uniformly sampled from
+    [0, max_maskprob]. This is done independently for each batch item.
     """
-    maskprob = tf.random.uniform([], minval=0, maxval=max_maskprob, dtype=tf.dtypes.float32)
-    return randomly_mask(tensor, maskprob)
-
-def randomly_mask(tensor, maskprob):
+    # Sample a masking probabilty for each batch item
+    maskprob = tf.random.uniform([tensor.shape[0]], minval=0, maxval=max_maskprob,
+            dtype=tf.dtypes.float32)
+    maskprob = tf.expand_dims(maskprob, axis=1)
+    maskprob = tf.tile(maskprob, [1, tensor.shape[1]])
+    # Create a mask
     mask = tf.random.uniform(tensor.shape, minval=0, maxval=1, dtype=tf.dtypes.float32)
     mask = tf.where(tf.less(mask, maskprob), tf.zeros_like(mask), tf.ones_like(mask))
     return tensor * tf.cast(mask, tensor.dtype)
@@ -186,11 +189,11 @@ if __name__ == '__main__':
         print('\n\n\nbatch: {}'.format(batch))
         example = next(lines)
         inputs, targets = example
+        print(inputs)
+        print(targets)
         inputs = [ids_to_python_string(x) for x in inputs]
-        print(targets)
-        targets = [(ids_to_python_string(backward), ids_to_python_string(forward)) for backward, forward in targets]
-        print(targets)
-
+        targets = [(ids_to_python_string(backward), ids_to_python_string(forward)) for\
+                backward, forward in targets]
         for idx in range(config['batchsize']):
             for x in inputs:
                 print(x[idx].replace(chr(0), '_'))
@@ -201,4 +204,3 @@ if __name__ == '__main__':
                 print()
 
             print('---------------------------------------')
-
