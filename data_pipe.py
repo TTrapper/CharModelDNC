@@ -28,7 +28,9 @@ def file_to_dataset(filepath, config, maskinputs=True):
     seqlen = config['seqlen']
     example_generator = make_example_generator(filepath, 2 + seqlen, batchsize, maskinputs)
     lines = tf.data.Dataset.from_generator(example_generator, tf.string, tf.TensorShape([batchsize]))
-    lines = lines.map(lambda line: tf.stack([string_to_ids(l) for l in tf.unstack(line)], axis=0))
+    lines = lines.unbatch()
+    lines = lines.map(lambda line: string_to_ids(line))
+    lines = lines.batch(batchsize)
     lines = lines.map(lambda line: tf.reshape(line, [batchsize, seqlen + 2])) # explicitly set shape
     lines = lines.map(lambda line: (line[:, 1:-1], collect_targets(line, config)))
     if maskinputs:
@@ -59,11 +61,11 @@ def collect_targets(line, config):
         targets.append((backward_targets, forward_targets))
     targets = tuple(targets)
     return targets
+
 def normalize(char_ids):
     """
     Maps chars in the ASCII range:
-        - lowercase
-        - maps all white space to the space char
+        - lowercases
     """
     ascii_upper_A = 65
     ascii_upper_Z = 90
@@ -71,9 +73,6 @@ def normalize(char_ids):
     difference = ascii_lower_a - ascii_upper_A
     char_ids = tf.where(tf.logical_and(char_ids >= ascii_upper_A, char_ids <= ascii_upper_Z),
             char_ids + difference, char_ids)
-    # Any ASCII value less than 32 is whitespace or commands
-    ascii_space = 32
-    char_ids = tf.where(char_ids <= ascii_space, ascii_space, char_ids)
     return char_ids
 
 def normalize_targets(char_ids_tuple):
