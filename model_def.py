@@ -7,53 +7,139 @@ import tensorflow as tf
 import data_pipe
 import random
 
+class LinearProject(tf.keras.layers.Layer):
+    """
+    Wraps a linear projection followed by layer normalization and dropout
+    """
+    def __init__(self, size, dropout, **kwargs):
+        super(LinearProject, self).__init__(kwargs)
+        self.dropout = dropout
+        self.size = size
+        self.dense = tf.keras.layers.Dense(size, None)
+        self.layernorm = tf.keras.layers.LayerNormalization()
+        self.trainable = True
+        if 'trainable' in kwargs:
+            self.trainable = kwargs['trainable']
 
+    def get_config(self):
+        config = super(LinearProject, self).get_config()
+        config.update({'size':self.size, 'dropout':self.dropout})
+        return config
 
-def attention_keys(values, position_embeds):
-    """
-    Creates attention keys from values by combining each slot with the mean of all slots,
-    and attaching position embeddings to the result.
-    """
-    batchsize, nslots, nheads, headsize = tf.unstack(tf.shape(values))
-    values = tf.reshape(values, [batchsize, nslots, nheads * headsize])
-    mean_slots = tf.reduce_mean(values, axis=1, keepdims=True) # batch, 1, nheads * headsize
-    values += mean_slots
-    return attach_position_embeds(values, position_embeds)
+    def call(self, values):
+        values = self.layernorm(self.dense(values))
+        return tf.keras.layers.Dropout(rate=self.dropout)(values)
 
-def attach_position_embeds(values, position_embeds):
+class Positioner(tf.keras.layers.Layer):
     """
-    Attaches position_embeds to each slot in values.
-    values : 3D tensor with shape [batchsize, nslots, slotsize]
-    position_embeds : Embedding layer with input_dim >= nslots
+    Takes a sequence of shape: [batchsize, numitems, itemsize] and adds position information by
+    performing a non-linear combination of each item with a one-hot representation of its position
     """
-    batchsize, nslots, slotsize = tf.unstack(tf.shape(values))
-    num_embeds = position_embeds.input_dim
-    pos = position_embeds(tf.range(nslots))
-    pos = tf.tile(tf.expand_dims(pos, axis=0), [batchsize, 1, 1]) # batchsize, nslots, pos_size
-    return tf.concat([values, pos], axis=2) # batch, nslots, slot_size + pos_size
+    def __init__(self, dropout, **kwargs):
+        super(Positioner, self).__init__(kwargs)
+        self.dropout = dropout
+        self.trainable = True
+        if 'trainable' in kwargs:
+            self.trainable = kwargs['trainable']
 
-def read(values, keys, trainable, namescope):
+    def get_config(self):
+        config = super(Positioner, self).get_config()
+        config.update({'dropout':self.dropout})
+        return config
+
+    def build(self, input_shape):
+        batchsize, nslots, slotsize = input_shape
+        self.dense = tf.keras.layers.Dense(slotsize, tf.nn.relu)
+
+    def call(self, values):
+        batchsize, nslots, slotsize = values.shape
+        pos = tf.one_hot(tf.range(nslots), nslots, dtype=values.dtype)
+        pos = tf.tile(tf.expand_dims(pos, axis=0), [batchsize, 1, 1]) # batchsize, nslots, nslots
+        values = tf.concat([values, pos], axis=2) # batch, nslots, slot_size + nslots
+        values = self.dense(values)
+        return tf.keras.layers.Dropout(rate=self.dropout)(values)
+
+class Reader(tf.keras.layers.Layer):
     """
-    Reads from the array of values by applying attention over dim 1
-    values : 4D tensor with shape [batchsize, nslots, nheads, headsize]
+    Uses multi-head attention to read from an array of shape [batchsize, nslots, nheads, headsize].
+    Additive attention is applied over the slots.
     """
-    batchsize, nslots, nheads, headsize = values.shape
-    weights = tf.keras.layers.Dense(nheads, None, trainable=trainable,
-            name=namescope + '_read_weights')(keys)
-    weights = tf.nn.softmax(weights, axis=1)
-    weights = tf.expand_dims(weights, axis=3) # batch, nslots, nheads, 1
-    attended_values = tf.reshape(weights * values, [batchsize, nslots, nheads * headsize])
-    return tf.reduce_sum(attended_values, axis=1)
+    def __init__(self, kernelsize, dropout, **kwargs):
+        super(Reader, self).__init__(kwargs)
+        self.kernelsize = kernelsize
+        self.dropout = dropout
+        self.trainable = False
+        if 'trainable' in kwargs:
+            self.trainable = kwargs['trainable']
+
+    def get_config(self):
+        config = super(Reader, self).get_config()
+        config.update({'kernelsize':self.kernelsize, 'dropout':self.dropout})
+        return config
+
+    def build(self, input_shape):
+        batchsize, nslots, nheads, headsize = input_shape
+        self.attend_layer = tf.keras.layers.Dense(nheads, None)
+        self.kernel = tf.keras.layers.Dense(self.kernelsize, tf.nn.relu)
+        self.projection_layer = LinearProject(nheads * headsize, self.dropout,
+                trainable=self.trainable) # TODO trainable has to be set explicitly. why?
+
+    @staticmethod
+    def get_keys(values):
+        """ Create attention keys by combining each slot with the mean of all slots """
+        batchsize, nslots, nheads, headsize = values.shape
+        slots = tf.reshape(values, [batchsize, nslots, nheads * headsize])
+        mean_slots = tf.tile(tf.reduce_mean(slots, axis=1, keepdims=True), [1, nslots, 1])
+        return tf.concat([slots, mean_slots], axis=2)
+
+    def call(self, values, keys=None):
+        batchsize, nslots, nheads, headsize = values.shape
+        # Compute attention weights
+        keys = self.get_keys(values) if keys is None else keys
+        weights = tf.nn.softmax(self.attend_layer(keys), axis=1)
+        weights = tf.expand_dims(weights, axis=3) # batch, nslots, nheads, 1
+        # Apply attention and process result
+        attended = tf.reshape(weights * values, [batchsize, nslots, nheads * headsize])
+        attended = tf.reduce_sum(attended, axis=1)
+        attended = self.kernel(attended)
+        attended = tf.keras.layers.Dropout(rate=self.dropout)(attended)
+        # Project to original size
+        attended = self.projection_layer(attended)
+        return tf.reshape(attended, [batchsize, 1, nheads,  headsize])
+
+class MultiReader(tf.keras.layers.Layer):
+    """
+    Performs parallel reads on the input sequence and concatenates the results.
+    """
+    def __init__(self, kernelsize, dropout, numreads, **kwargs):
+        super(MultiReader, self).__init__(kwargs)
+        self.kernelsize = kernelsize
+        self.dropout = dropout
+        self.numreads = numreads
+        self.trainable = False
+        if 'trainable' in kwargs:
+            self.trainable = kwargs['trainable']
+        self.readers = [Reader(kernelsize, dropout, **kwargs) for _ in range(numreads)]
+
+    def get_config(self):
+        config = super(MultiReader, self).get_config()
+        config.update({'kernelsize':self.kernelsize,
+                       'dropout':self.dropout,
+                       'numreads': self.numreads})
+        return config
+
+    def call(self, values):
+        keys = Reader.get_keys(values) # compute keys once and reuse for each read
+        reads = [reader(values, keys=keys) for reader in self.readers]
+        return tf.concat(reads, axis=1)
 
 def write(new_values, keys, old_values, trainable, namescope):
     """
     Writes new values into the old values using attention
     """
     batchsize, nslots, nheads, headsize = old_values.shape
-    # Add new values to the right keys and compute write weights
+    # Add new values to the write keys and compute write weights
     new_values = tf.reshape(new_values, [batchsize, 1, nheads * headsize])
-    pos_pad = tf.zeros([batchsize, 1, keys.shape[-1] - new_values.shape[-1]], keys.dtype)
-    keys += tf.concat([new_values, pos_pad], axis=2)
     weights = tf.keras.layers.Dense(nheads, None, trainable=trainable,
             name=namescope + '_write_weights')(keys)
     weights = tf.nn.sigmoid(weights)
@@ -62,34 +148,20 @@ def write(new_values, keys, old_values, trainable, namescope):
     new_values = tf.reshape(new_values, [batchsize, 1, nheads, headsize])
     return ((1 - weights) * old_values) + (weights * new_values)
 
-def read_and_write(values, position_embeds, kernelsize, trainable, dropout, namescope):
-    """
-    Given an array of slotted values representing a neural memory array:
-      1) read from those values using multi-head attention along the slots
-      2) compute new values
-      3) write the new values using multi-head attention along the slots
-    """
-    batchsize, nslots, nheads, headsize = values.shape
-    keys = attention_keys(values, position_embeds)
-    attended = read(values, keys, trainable, namescope)
-    # Do a dense layer transform on the result of the read
-    attended = tf.keras.layers.Dense(kernelsize, tf.nn.relu, trainable=trainable,
-            name=namescope + '_kernel')(attended)
-    attended = tf.keras.layers.Dropout(rate=dropout)(attended)
-    # Project to original size in preparation for write
-    attended = linear_project(attended, nheads * headsize, trainable, dropout, namescope)
-    return write(attended, keys, values, trainable, namescope)
 
 def compress(values, trainable, dropout, namescope):
     """
-    Compresses the sequence by shaping the values to put neighbouring slots together and projecting
-    each pair of slots down to the size of a single slot.
+    Compresses the sequence by shaping the values to put neighbouring slots together, effectively
+    halving the sequence length while doubling the feature size
     """
     batchsize, nslots, nheads, headsize = values.shape
     slotsize = nheads * headsize
     values = tf.reshape(values, [batchsize, nslots // 2, 2 * slotsize])
-    values = linear_project(values, slotsize, trainable, dropout, namescope)
-    return tf.reshape(values, [batchsize, nslots // 2, nheads, headsize])
+    values = tf.keras.layers.Dense(2 * slotsize, tf.nn.relu, trainable=trainable,
+            name='{}_compress_dense'.format(namescope))(values)
+    values = tf.keras.layers.Dropout(rate=dropout)(values)
+    return tf.reshape(values, [batchsize, nslots // 2, 2* nheads, headsize])
+
 
 def make_model(config):
     inputs_collector = []
@@ -98,26 +170,29 @@ def make_model(config):
             trainable=config['train_char_embeds'])
     char_embeds = embed_characters(char_embed_layer, config, inputs_collector)
     previous_slotsize = char_embeds.shape[-1]
+    dropout = config['dropout']
     for blocknum, block_config in enumerate(config['blocks']):
         namescope = 'block_{}'.format(blocknum)
         trainable = block_config['trainable']
+        nslots = block_config['memsize']
         slotsize = block_config['wordsize']
-        if previous_slotsize != slotsize:
-            char_embeds = tf.reshape(char_embeds, [-1, block_config['memsize'], previous_slotsize])
-            char_embeds = linear_project(char_embeds, slotsize, trainable,
-                    config['dropout'], namescope + '_in_projection')
-        char_embeds = tf.reshape(char_embeds, [-1, block_config['memsize'],
-            block_config['numheads'], config['char_embed_size']])
-        for layernum, layer in enumerate(range(block_config['numlayers'])):
-            layerscope = '_layer_{}'.format(layernum)
-            char_embeds = read_and_write(char_embeds, char_embed_layer, block_config['kernelsize'],
-                trainable, config['dropout'], namescope + layerscope)
+        # Position information for each slot
+        char_embeds = tf.reshape(char_embeds, [-1, nslots, previous_slotsize])
+        char_embeds = Positioner(dropout=dropout, trainable=trainable)(char_embeds)
+        # Project and reshape to this block's size
+        char_embeds = LinearProject(slotsize, dropout, trainable=trainable)(char_embeds)
+        char_embeds = tf.reshape(char_embeds, [-1, nslots, block_config['numheads'],
+            config['headsize']])
+        # Attention and rewrite layers
+        char_embeds = MultiReader(block_config['kernelsize'], dropout, nslots,
+                trainable=trainable)(char_embeds)
         if block_config['compress']:
-            char_embeds = compress(char_embeds, trainable, config['dropout'],
-                    namescope)
-        previous_slotsize = slotsize
+            nslots //= 2
+        char_embeds = MultiReader(block_config['kernelsize'], dropout, nslots,
+                trainable=trainable)(char_embeds)
         # Logits from this block
         batchsize, nslots, nheads, headsize = char_embeds.shape
+        previous_slotsize = nheads * headsize
         subseqlen = block_config['subseqlen_compressed']
         assert batchsize == config['batchsize'] * config['seqlen'] // subseqlen
         context = tf.reshape(char_embeds, [batchsize, nslots * nheads * headsize])
@@ -142,16 +217,8 @@ def embed_characters(char_embed_layer, config, inputs_collector):
     char_embeds = tf.reduce_mean(tf.stack([char_embeds, char_embeds_normalized]), axis=0)
     char_embeds = tf.keras.layers.LayerNormalization(trainable=config['train_char_embeds'])\
             (char_embeds)
-    char_embeds = tf.keras.layers.Dropout(rate=config['dropout'])(char_embeds)
     return char_embeds # batch, seqlen, embedsize
 
-
-def linear_project(values, size, trainable, dropout, namescope):
-    values = tf.keras.layers.Dense(size, None, trainable=trainable,
-            name=namescope + '_dense')(values)
-    values = tf.keras.layers.LayerNormalization(trainable=trainable,
-            name=namescope + '_layernorm')(values)
-    return tf.keras.layers.Dropout(rate=dropout)(values)
 
 @tf.function
 def sample_logits(logits, temperature):
