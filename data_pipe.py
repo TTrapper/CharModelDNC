@@ -26,21 +26,22 @@ def make_example_generator(filepath, seqlen, batchsize, shuffle):
 def file_to_dataset(filepath, config, maskinputs=True):
     batchsize = config['batchsize']
     seqlen = config['seqlen']
-    example_generator = make_example_generator(filepath, 2 + seqlen, batchsize, maskinputs)
+    predict_ahead = config['predict_ahead']
+    xy_seqlen = seqlen + predict_ahead
+    example_generator = make_example_generator(filepath, xy_seqlen, batchsize, maskinputs)
     lines = tf.data.Dataset.from_generator(example_generator, tf.string, tf.TensorShape([batchsize]))
     lines = lines.unbatch()
     lines = lines.map(lambda line: string_to_ids(line))
     lines = lines.batch(batchsize)
-    lines = lines.map(lambda line: tf.reshape(line, [batchsize, seqlen + 2])) # explicitly set shape
-    lines = lines.map(lambda line: (line[:, 1:-1], collect_targets(line, config)))
+    lines = lines.map(lambda line: tf.reshape(line, [batchsize, xy_seqlen])) # explicitly set shape
+    lines = lines.map(lambda line: (line[:, :-predict_ahead], line[:, -predict_ahead:]))
     if maskinputs:
         # Randomly mask some of the input values
-        lines = lines.map(lambda x,y: (randomly_mask_sampled_maskprob(x, 0.3), y))
-        lines = lines.map(lambda x,y: (randomly_sequence_mask(x), y))
-        chars_per_span_mask = 64 # Apply a span mask for every N chars in the sequence
-#        for _ in range(seqlen // chars_per_span_mask):
-#            lines = lines.map(lambda x,y: (randomly_span_mask(x), y))
-    lines = lines.map(lambda x,y: ((x, normalize(x)), y))
+        lines = lines.map(lambda x,y: (randomly_mask_sampled_maskprob(x, 0.05, 0.2), y))
+        for _ in range(seqlen // 32):
+            lines = lines.map(lambda x,y: (randomly_span_mask(x, 0, 8), y))
+    lines = lines.map(lambda x,y: ((x, normalize(x),
+        randomly_mask_sampled_maskprob(add_go_byte(y), 0.05, 0.2)), (normalize(y), y[:, :1])))
     lines = lines.prefetch(4)
     return lines
 
@@ -108,13 +109,13 @@ def mask_first_char(tensor):
     go = tf.zeros([batchsize, 1], tensor.dtype)
     return tf.concat([go, tensor[:, 1:]], axis=1)
 
-def randomly_mask_sampled_maskprob(tensor, max_maskprob):
+def randomly_mask_sampled_maskprob(tensor, min_maskprob, max_maskprob):
     """
     Randomly mask values in the tensor, where the masking rate is uniformly sampled from
     [0, max_maskprob]. This is done independently for each batch item.
     """
     # Sample a masking probabilty for each batch item
-    maskprob = tf.random.uniform([tensor.shape[0]], minval=0, maxval=max_maskprob,
+    maskprob = tf.random.uniform([tensor.shape[0]], minval=min_maskprob, maxval=max_maskprob,
             dtype=tf.dtypes.float32)
     maskprob = tf.expand_dims(maskprob, axis=1)
     maskprob = tf.tile(maskprob, [1, tensor.shape[1]])
@@ -134,20 +135,19 @@ def randomly_sequence_mask(tensor):
     lengths = tf.random.uniform(shape=[num_masked], minval=0, maxval=maxlen, dtype=tf.int32)
     lengths = tf.concat([lengths, tf.zeros([batchsize - num_masked], dtype=lengths.dtype)], axis=0)
     mask = tf.sequence_mask(lengths, maxlen=maxlen)
-    return tf.where(mask, tf.ones_like(tensor), tensor)
+    return tf.where(mask, tf.zeros_like(tensor), tensor)
 
-def randomly_span_mask(tensor):
+def randomly_span_mask(tensor, mean_span_len, stdv_span_len):
     """ Mask a random span of contiguous characters within each example """
     batchsize, maxlen = tensor.shape
-    mean_span_len = 8 # Tends to cover about a word or two
-    stdv_span_len = 2
     def span_mask(vector): # computes and applies mask to a single row of the batch
         span_len = tf.random.normal(shape=[], mean=mean_span_len, stddev=stdv_span_len)
         span_len = tf.cast(span_len, tf.int32)
         span_len = tf.math.maximum(0, span_len)
         span_len = tf.math.minimum(maxlen, span_len)
         mask = tf.zeros([span_len], dtype=vector.dtype)
-        span_start = tf.random.uniform(shape=[], minval=0, maxval=maxlen - span_len, dtype=tf.int32)
+        span_start = tf.random.uniform(shape=[], minval=0, maxval=tf.maximum(1, maxlen - span_len),
+                dtype=tf.int32)
         left_pad = tf.ones([span_start], dtype=vector.dtype)
         right_pad = tf.ones([maxlen - (span_start + span_len)], dtype=vector.dtype)
         mask = tf.concat([left_pad, mask, right_pad], axis=0)
@@ -191,15 +191,14 @@ if __name__ == '__main__':
         print(inputs)
         print(targets)
         inputs = [ids_to_python_string(x) for x in inputs]
-        targets = [(ids_to_python_string(backward), ids_to_python_string(forward)) for\
-                backward, forward in targets]
+        targets = [ids_to_python_string(y) for y in targets]
         for idx in range(config['batchsize']):
+            print('Inputs:')
             for x in inputs:
                 print(x[idx].replace(chr(0), '_'))
                 print()
-            for backward_y, forward_y in targets:
-                print('Backward: ', backward_y[idx])
-                print('Forward:', forward_y[idx])
+            print('Targets:')
+            for y in targets:
+                print(y[idx])
                 print()
-
             print('---------------------------------------')
